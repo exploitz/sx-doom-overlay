@@ -56,10 +56,25 @@ fi
 # --- Step 1: install the devkitPro pacman wrapper -----------------------------
 
 bold "==> Step 1: download install-devkitpro-pacman"
-wget -q -O "$INSTALLER_PATH" "$INSTALLER_URL"
+echo "    URL: $INSTALLER_URL"
+echo "    Saving to: $INSTALLER_PATH"
+if ! wget --no-verbose --show-progress -O "$INSTALLER_PATH" "$INSTALLER_URL"; then
+    err "wget failed to fetch $INSTALLER_URL"
+    err "Possible causes: no network, DNS issue, or devkitPro infra moved."
+    err "Check your connection: curl -I https://apt.devkitpro.org/"
+    exit 1
+fi
+if [ ! -s "$INSTALLER_PATH" ]; then
+    err "Downloaded file is empty or missing: $INSTALLER_PATH"
+    err "Try downloading manually and re-running with INSTALLER_PATH already populated."
+    exit 1
+fi
+echo "    Downloaded $(wc -c < "$INSTALLER_PATH") bytes."
 chmod +x "$INSTALLER_PATH"
 
 bold "==> Step 2: run installer (will prompt for sudo password)"
+echo "    NOTE: this step adds an apt source for apt.devkitpro.org and runs apt update."
+echo "    It will pause for your sudo password — type it and press enter."
 sudo "$INSTALLER_PATH"
 
 # --- Step 3: install switch-dev ----------------------------------------------

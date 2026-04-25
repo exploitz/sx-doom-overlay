@@ -135,9 +135,9 @@ This section is intentionally just enough for `/spec` to produce a sound impleme
 
 At 3× render scale, framebuffer cost rises to 2.3 MB; the zone allocator must drop to `-mb 3` to compensate. Freedoom 1 may thrash under that combination; commercial `DOOM1.WAD` is comfortable.
 
-### WAD Loading Model (the 12 MB WAD vs. 8 MB heap)
+### WAD Loading Model (the ~29 MB WAD vs. 8 MB heap)
 
-Freedoom 1 is ~12 MB on disk, which does *not* need to fit in the 8 MB heap. Chocolate Doom (and therefore doomgeneric) follow the original 1993 Doom design:
+Freedoom 1 is ~28.8 MB (v0.13.0; was ~12 MB in earlier releases) on disk, which does *not* need to fit in the 8 MB heap. Chocolate Doom (and therefore doomgeneric) follow the original 1993 Doom design:
 
 - `W_AddFile()` opens the WAD via `fopen` and reads only the **lump directory** (~50–100 KB index of all lumps with their offsets and sizes). The WAD file handle stays open during gameplay; the WAD body stays on SD card.
 - When the engine needs a lump (texture, sprite, level geometry, sound), `W_CacheLumpNum()` performs `fseek` + `fread` from the WAD into the zone allocator (`Z_Malloc(PU_CACHE)`).
@@ -145,7 +145,7 @@ Freedoom 1 is ~12 MB on disk, which does *not* need to fit in the 8 MB heap. Cho
 - Per-level working set is typically 1–2 MB — fits comfortably inside our 4 MB zone.
 - **The trade-off is hitching** on level transitions and on first-encounter of sprites/sounds. Switch SD cards do 50–100 MB/s sequential and 10–30 MB/s random, so per-lump latency is a few ms; aggregate per-level load on the order of 50–100 ms (covered by the performance targets).
 
-Vanilla Doom shipped on 386s with 4 MB RAM streaming from spinning hard disks. The 12 MB-WAD-on-SD model is the engine's intended design, not a workaround.
+Vanilla Doom shipped on 386s with 4 MB RAM streaming from spinning hard disks. A 29-MB-WAD-on-SD model is the engine's intended design, not a workaround. **Side effect of the larger Freedoom size:** our release zip will weigh in around ~30 MB instead of ~15 MB. Download time on slow connections is roughly doubled. Worth noting in the release README.
 
 ### Heap Provisioning Strategy
 
@@ -282,7 +282,7 @@ doomgeneric is vendored as a git submodule; its `i_main.c::main()` is excluded f
 |---|---|---|
 | Audio coexistence with foreground game's `audout` may fail on some HOS+game combos. | High | Detect `audoutInitialize` failure, run silent, toast once, document in README. |
 | libtesla composite cost at 2× / 3× scale on Tegra X1 has no published benchmark. May force scale-down. | Medium | Profile early on real hardware; if 2× isn't 35 Hz stable, fall back to 1× default. |
-| Freedoom 1 (~12 MB on disk) thrashes the 4 MB Doom zone on bigger maps; visible hitching on level transitions. | Medium | Document in README; recommend BYO-WAD with shareware DOOM1.WAD for smoother play; tune lump cache replacement policy if needed. |
+| Freedoom 1 (~28.8 MB on disk for v0.13.0; was ~12 MB in earlier releases) thrashes the 4 MB Doom zone on bigger maps; visible hitching on level transitions. | Medium | Document in README; recommend BYO-WAD with shareware DOOM1.WAD for smoother play; tune lump cache replacement policy if needed. |
 | nx-ovlloader `fatalThrow`s on `svcSetHeapSize` failure, so any auto-write of `heap_size.bin` is dangerous. | High (already mitigated) | Do not auto-write. Detect at runtime and instruct user. |
 | HOS 21+ shipping with 4 MB default heap is a UX cliff for fresh installs. | Medium | First-launch heap-too-small error screen with exact remediation steps. |
 | HOS major bumps regularly break libtesla. | Medium | Pin libultrahand submodule; CI-build against multiple HOS versions where possible. |

@@ -150,8 +150,8 @@ This is a Switch overlay — browser-driven E2E doesn't apply. The Goal Verifica
 
 ## Progress Tracking
 
-- [ ] Task 1: Project bootstrap (git init, submodules, Makefile, .gitignore)
-- [ ] Task 2: Desktop engine smoke + MIN_RAM patch
+- [x] Task 1: Project bootstrap (git init, submodules, Makefile, .gitignore) — committed `2367015`. Three DoD items pending devkitPro install: full `make`, `make patches` no-op, patch-failure-loud test.
+- [x] Task 2: Desktop engine smoke + MIN_RAM patch — committed below. Engine boots Freedoom 1 to "Phase 1" banner, 20 PPM frames produced, ASan + UBSan clean. valgrind DoD substituted with ASan (valgrind not installed, no sudo).
 - [ ] Task 3: Palette + scale blit module (desktop unit-tested)
 - [ ] Task 4: Audio mixer module (`DG_sound_module` impl, desktop unit-tested)
 - [ ] Task 5: Cross-build smoke (devkitA64 produces .ovl)
@@ -163,7 +163,7 @@ This is a Switch overlay — browser-driven E2E doesn't apply. The Goal Verifica
 - [ ] Task 11: Settings menu + INI persistence + BYO-WAD detection
 - [ ] Task 12: Save/load wiring + release packaging
 
-**Total Tasks:** 12 | **Completed:** 0 | **Remaining:** 12
+**Total Tasks:** 12 | **Completed:** 2 | **Remaining:** 10
 
 ## Implementation Tasks
 

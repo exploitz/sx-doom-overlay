@@ -1,0 +1,47 @@
+From: chase <gober.chase@gmail.com>
+Subject: [PATCH 0001] Lower DEFAULT_RAM and MIN_RAM to 3 MiB for overlay budget
+
+The Switch overlay environment caps total heap at 8 MiB (system memory pool
+ceiling, per nx-ovlloader README). After accounting for the libtesla
+framebuffer (~1 MiB at scale=2), Doom static data (~1 MiB), audio buffers
+(~0.5 MiB), libstdc++ runtime (~0.5 MiB), and a 1 MiB safety margin, the
+zone allocator must fit in 4 MiB. doomgeneric (and upstream chocolate-doom)
+clamps the engine zone to MIN_RAM, currently 6 MiB — too large for our
+budget.
+
+Lowering DEFAULT_RAM and MIN_RAM to 3 MiB is well within the engine's
+historical floor: vanilla 1993 Doom shipped on 386s with 4 MiB total system
+RAM (Doom got ~3 MiB after DOS overhead), and embedded ports such as
+stm32doom run Chocolate Doom in <4 MiB zones today. The 6 MiB upstream
+default is defensive padding for modern PWADs / megawads, not a hard
+engine requirement.
+
+Trade-off: levels with very dense lump working sets (Plutonia MAP29-style
+maps in user-supplied PWADs) may hit Z_Malloc failures and engine-internal
+I_Error() under the smaller zone. Freedoom Phase 1 (our default IWAD) is
+modeled on vanilla Doom 1 episode 1 sizes and is expected to be safe.
+Documented as Risk #2 in docs/plans/2026-04-25-doom-overlay.md.
+
+This patch is applied to lib/doomgeneric at build time by the project
+Makefile's `patches` target. Re-rolls cleanly against any future upstream
+that doesn't restructure i_system.c.
+
+---
+ doomgeneric/i_system.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/doomgeneric/i_system.c b/doomgeneric/i_system.c
+index 0000000..0000000 100644
+--- a/doomgeneric/i_system.c
++++ b/doomgeneric/i_system.c
+@@ -55,8 +55,8 @@
+ #include <CoreFoundation/CFUserNotification.h>
+ #endif
+
+-#define DEFAULT_RAM 6 /* MiB */
+-#define MIN_RAM     6  /* MiB */
++#define DEFAULT_RAM 3 /* MiB — lowered for sx-doom-overlay 8 MiB budget */
++#define MIN_RAM     3  /* MiB — lowered for sx-doom-overlay 8 MiB budget */
+
+
+ typedef struct atexit_listentry_s atexit_listentry_t;

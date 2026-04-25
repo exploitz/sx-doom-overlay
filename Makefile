@@ -69,7 +69,8 @@ LIBDIRS := $(PORTLIBS) $(LIBNX) $(LIBDIRS)
 export OUTPUT := $(CURDIR)/out/$(TARGET)
 
 # -----------------------------------------------------------------------------
-# Patch handling — MUST fail loud, never silent.
+# Patch handling — delegated to scripts/apply-patches.sh (idempotent, fail-loud).
+# Same script is used by tests/desktop, ensuring single source of truth.
 # -----------------------------------------------------------------------------
 PATCH_SENTINEL := lib/doomgeneric/.patched
 PATCH_FILES    := $(sort $(wildcard patches/*.patch))
@@ -77,26 +78,8 @@ PATCH_FILES    := $(sort $(wildcard patches/*.patch))
 .PHONY: patches
 patches: $(PATCH_SENTINEL)
 
-$(PATCH_SENTINEL): $(PATCH_FILES) | lib/doomgeneric
-	@if [ -z "$(PATCH_FILES)" ]; then \
-		echo "[patches] no patches in patches/ — skipping"; \
-	else \
-		set -e; \
-		cd lib/doomgeneric && \
-		for p in $(addprefix ../../,$(PATCH_FILES)); do \
-			echo "[patches] applying $$p"; \
-			git apply --check "$$p" || { \
-				echo "ERROR: patch $$p does not apply cleanly."; \
-				echo "       Re-roll the patch against the current submodule HEAD before continuing."; \
-				exit 1; \
-			}; \
-			git apply "$$p" || { \
-				echo "ERROR: git apply failed for $$p (check passed but apply failed — this should not happen)"; \
-				exit 1; \
-			}; \
-		done; \
-	fi
-	@touch $(PATCH_SENTINEL)
+$(PATCH_SENTINEL): $(PATCH_FILES) scripts/apply-patches.sh | lib/doomgeneric
+	@bash scripts/apply-patches.sh
 
 # -----------------------------------------------------------------------------
 # Build flow
