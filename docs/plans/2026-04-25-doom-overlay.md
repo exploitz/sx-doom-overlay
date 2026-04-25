@@ -218,7 +218,7 @@ This is a Switch overlay — browser-driven E2E doesn't apply. The Goal Verifica
 - [ ] Task 11: Settings menu + INI persistence + BYO-WAD detection
 - [ ] Task 12: Save/load wiring + release packaging
 
-**Total Tasks:** 12 | **Completed:** 4 | **Remaining:** 8
+**Total Tasks:** 12 | **Completed:** 5 | **Remaining:** 7
 
 ## Implementation Tasks
 
