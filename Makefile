@@ -171,7 +171,14 @@ $(OUTPUT).ovl: $(OUTPUT).nro
 	@cp $< $@
 	@echo "[ovl] $(notdir $@)"
 
+# Override switch_rules' default %.nro recipe so elf2nro embeds the .nacp.
+# Without --nacp=, the resulting .nro has no title metadata and Ultrahand
+# silently skips it from the overlay menu (no error, just doesn't appear).
+# Both the .elf and .nacp must be built first, hence the explicit deps.
 $(OUTPUT).nro: $(OUTPUT).elf $(OUTPUT).nacp
+	@elf2nro $< $@ --nacp=$(OUTPUT).nacp $(NROFLAGS)
+	@echo built ... $(notdir $@)
+
 $(OUTPUT).elf: $(OFILES)
 
 # Default rules supplied by switch_rules + base_rules cover .o, .elf, .nro,
