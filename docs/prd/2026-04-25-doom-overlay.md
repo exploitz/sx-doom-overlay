@@ -265,7 +265,8 @@ doomgeneric is vendored as a git submodule; its `i_main.c::main()` is excluded f
 ### Constraints (Hard)
 
 - Target floor: **OG Switch (Erista, Tegra X1) handheld mode**. No GPU access, software framebuffer only, ARM64.
-- Overlay heap: **8 MB target** (system-memory pool ceiling on a default Atmosphère install; loader `fatalThrow`s on overshoot).
+- Overlay heap: **8 MB target** (system-memory pool ceiling on a default Atmosphère install; loader `fatalThrow`s on overshoot). Empirically the kernel pool can stretch to ~10–12 MB on most devices — UltraGB-Overlay ships a working "10 MB+" tier — but we don't depend on more than 8.
+- **Engine error path must NOT call `exit()`.** doomgeneric's `I_Error` upstream calls `exit(-1)`, which in an overlay terminates the entire nx-ovlloader sysmodule (not just our overlay). Our build patches `i_system.c`'s 5 `exit()` sites to `setjmp/longjmp` so engine errors become survivable — overlay UI stays alive; user sees a toast and can dismiss cleanly. This is the verified primary blocker for engine-in-overlay; without this patch, any Z_Init OOM, missing WAD, or fatal lump error bricks the user's overlay system until they relaunch from hbmenu.
 - Build: `-fno-exceptions -fno-rtti` mandatory (libultrahand convention; doomgeneric is C, unaffected).
 - License: GPLv2 (engine is GPLv2; libtesla and libultra are GPLv2; Freedoom is BSD-3, GPL-compatible).
 - No bundled commercial WADs.
@@ -286,14 +287,16 @@ doomgeneric is vendored as a git submodule; its `i_main.c::main()` is excluded f
 | nx-ovlloader `fatalThrow`s on `svcSetHeapSize` failure, so any auto-write of `heap_size.bin` is dangerous. | High (already mitigated) | Do not auto-write. Detect at runtime and instruct user. |
 | HOS 21+ shipping with 4 MB default heap is a UX cliff for fresh installs. | Medium | First-launch heap-too-small error screen with exact remediation steps. |
 | HOS major bumps regularly break libtesla. | Medium | Pin libultrahand submodule; CI-build against multiple HOS versions where possible. |
-| Sleep/wake desync of audio (sys-tune precedent reports this). | Low | Hook libnx applet messages; on resume, drop the audio buffer and reinit `audout`. |
+| Sleep/wake desync of audio (sys-tune precedent reports this). | Low | Use `Overlay::onHide` / `onShow` lifecycle hooks (UltraGB pattern); on resume, drop the audio buffer and reinit `audoutStartAudioOut`. |
+| **HOS 22 (April 2026) breaks nx-ovlloader 2.0.0** (libnx upstream commit `fdf3c87`, Ultrahand-Overlay/issues/305). | Medium-High | Verify user's HOS version before deployment; document required Ultrahand+nx-ovlloader versions in README. If HOS 22, wait for nx-ovlloader 2.0.1+ or pin libnx. |
+| Engine `exit()` / `I_Error` would kill nx-ovlloader sysmodule (THE primary blocker for engine-in-overlay). | Critical without mitigation | `patches/0002-patch-exit-sites.patch` converts the 5 `exit()` sites in `i_system.c` to `setjmp/longjmp`. Mitigated to safe by the patch. |
 | Doom's input model assumes keyboard scancodes; we map libnx HID → Doom keycodes. Edge cases: rapid double-tap, simultaneous keys. | Low | Use Chocolate Doom's existing key-event queue verbatim; only the source of events changes. |
 
 ## Key Decisions
 
 | Decision | Choice | Why |
 |---|---|---|
-| Engine | doomgeneric | Chocolate Doom under the hood with a clean six-function platform seam; pure C99; minimal porting surface. Chocolate Doom proper is too SDL-coupled. |
+| Engine | doomgeneric | Chocolate Doom under the hood with a clean six-function platform seam; pure C99; minimal porting surface. Chocolate Doom proper is too SDL-coupled. **`lantus/chocolate-doom-nx-master` empirically rejected** (research v2 — see plan §"Approach" alternatives): it depends on `SDL_INIT_VIDEO` (`nvhost-gpu` GL bits NOT in the overlay's `nvdrv:a` mask `0x10A9`) and `SDL_mixer` (`audren:u` also missing), so engine init fails immediately. Cannot be patched without rewriting it to be functionally identical to doomgeneric. UltraGB-Overlay validates the doomgeneric-class architecture (no SDL, CPU blit, libnx audout) as the only working engine-in-overlay model. |
 | Audio | Path A (in v1) | sys-tune proves overlays can produce audio. doomgeneric strips audio, so we re-port `i_sound.c` / `s_sound.c` on top — non-trivial but contained. User strongly preferred audio. Falls back to silent on init failure. |
 | WAD | Bundle Freedoom 1; BYO-WAD override | Freedoom is BSD-3, GPL-compatible, redistributable. Commercial DOOM1.WAD is not safely bundleable. BYO is small extra surface and preserves user choice. |
 | Display | Native-sized centered, runtime scale 1× / 2× / 3×; default 2× | Mirrors UltraGB-Overlay's proven pattern. Low default heap cost, user can scale up. Avoids the "wide overlay won't work" concern by *not* claiming the whole 1280×720 surface unless the user opts in. |
