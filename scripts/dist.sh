@@ -73,6 +73,10 @@ cp "$OVL_PATH" "$STAGE_DIR/switch/.overlays/sx-doom-overlay.ovl"
 cp "$WAD_PATH" "$STAGE_DIR/switch/.overlays/doom/freedoom1.wad"
 [ -f "$LICENSE_PATH" ] && cp "$LICENSE_PATH" "$STAGE_DIR/switch/.overlays/doom/LICENSE.freedoom"
 cp "$README_PATH" "$STAGE_DIR/README.md"
+# Top-level GPLv2 license for our overlay code (GPL §3 source-availability is
+# satisfied by README pointing at the GitHub repo, but shipping a copy of the
+# license text in the zip makes the binary legally self-explanatory).
+[ -f "$ROOT/LICENSE" ] && cp "$ROOT/LICENSE" "$STAGE_DIR/LICENSE"
 
 bold "==> Zipping"
 rm -f "$ZIP_PATH"
