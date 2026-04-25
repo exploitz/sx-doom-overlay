@@ -15,8 +15,6 @@
 set -euo pipefail
 
 DEVKITPRO_DIR="/opt/devkitpro"
-INSTALLER_URL="https://apt.devkitpro.org/install-devkitpro-pacman"
-INSTALLER_PATH="/tmp/install-devkitpro-pacman"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 err() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; }
@@ -54,28 +52,44 @@ if [ ! -f /etc/debian_version ] && [ ! -f /etc/lsb-release ]; then
 fi
 
 # --- Step 1: install the devkitPro pacman wrapper -----------------------------
+#
+# We INLINE the install-devkitpro-pacman script's logic instead of fetching it.
+# Reason: apt.devkitpro.org's Cloudflare returns 403 to wget's default UA, so
+# fetching the script directly fails. The script itself is only 18 lines and
+# the operations are stable, so inlining is more robust than fighting UA blocks.
+# (The script is reproduced verbatim from https://apt.devkitpro.org/install-devkitpro-pacman
+# as of devkitPro pacman v6.0.2.)
+#
+# This will:
+#   1. Install apt-transport-https
+#   2. Fetch devkitPro's GPG key with UA "dkp apt" (Cloudflare-friendly)
+#   3. Add the devkitPro apt source (signed by that key)
+#   4. apt update + install devkitpro-pacman
 
-bold "==> Step 1: download install-devkitpro-pacman"
-echo "    URL: $INSTALLER_URL"
-echo "    Saving to: $INSTALLER_PATH"
-if ! wget --no-verbose --show-progress -O "$INSTALLER_PATH" "$INSTALLER_URL"; then
-    err "wget failed to fetch $INSTALLER_URL"
-    err "Possible causes: no network, DNS issue, or devkitPro infra moved."
-    err "Check your connection: curl -I https://apt.devkitpro.org/"
-    exit 1
-fi
-if [ ! -s "$INSTALLER_PATH" ]; then
-    err "Downloaded file is empty or missing: $INSTALLER_PATH"
-    err "Try downloading manually and re-running with INSTALLER_PATH already populated."
-    exit 1
-fi
-echo "    Downloaded $(wc -c < "$INSTALLER_PATH") bytes."
-chmod +x "$INSTALLER_PATH"
+bold "==> Step 1+2: configure apt source + install devkitpro-pacman"
+echo "    NOTE: requires sudo. Adds /etc/apt/sources.list.d/devkitpro.list and"
+echo "    /usr/share/keyring/devkitpro-pub.gpg, then runs apt update + apt install."
 
-bold "==> Step 2: run installer (will prompt for sudo password)"
-echo "    NOTE: this step adds an apt source for apt.devkitpro.org and runs apt update."
-echo "    It will pause for your sudo password — type it and press enter."
-sudo "$INSTALLER_PATH"
+sudo bash <<'INLINE_INSTALL'
+set -e
+apt-get install -y apt-transport-https
+
+# Store devkitPro gpg key locally if we don't have it already
+if ! [ -f /usr/share/keyring/devkitpro-pub.gpg ]; then
+    mkdir -p /usr/share/keyring/
+    wget -U "dkp apt" -O /usr/share/keyring/devkitpro-pub.gpg \
+        https://apt.devkitpro.org/devkitpro-pub.gpg
+fi
+
+# Add the devkitPro apt repository if we don't have it set up already
+if ! [ -f /etc/apt/sources.list.d/devkitpro.list ]; then
+    echo "deb [signed-by=/usr/share/keyring/devkitpro-pub.gpg] https://apt.devkitpro.org stable main" \
+        > /etc/apt/sources.list.d/devkitpro.list
+fi
+
+apt-get update
+apt-get install -y devkitpro-pacman
+INLINE_INSTALL
 
 # --- Step 3: install switch-dev ----------------------------------------------
 
