@@ -91,6 +91,23 @@ $(TEST_BLIT_BIN): test_blit.cpp $(ROOT)/source/blit.cpp $(ROOT)/source/blit.hpp 
 		test_blit.cpp $(ROOT)/source/blit.cpp \
 		-o $(TEST_BLIT_BIN)
 
+# --- test_sound (Task 4 unit tests) -----------------------------------------
+TEST_SOUND_BIN := $(OUT_DIR)/test_sound
+test_sound: $(TEST_SOUND_BIN)
+	@echo "[test_sound] running unit tests..."
+	@$(TEST_SOUND_BIN)
+	@echo "[test_sound] OK — wav at out/test_sound_roundtrip.wav"
+
+$(TEST_SOUND_BIN): test_sound.c audio_backend_wav.c \
+                   $(ROOT)/source/audio_mixer.c $(ROOT)/source/audio_mixer.h \
+                   $(ROOT)/source/audio_backend.h | $(OUT_DIR)
+	@echo "[compile] $(TEST_SOUND_BIN)"
+	@gcc -std=c11 -O2 -g -Wall -Wextra -Werror \
+		-fsanitize=address,undefined \
+		-I$(ROOT)/source \
+		test_sound.c audio_backend_wav.c $(ROOT)/source/audio_mixer.c \
+		-o $(TEST_SOUND_BIN)
+
 # --- Patch application -------------------------------------------------------
 # We delegate to scripts/apply-patches.sh (the canonical applier). Idempotent
 # — if patches are already in effect, it's a fast no-op.

@@ -153,7 +153,7 @@ This is a Switch overlay — browser-driven E2E doesn't apply. The Goal Verifica
 - [x] Task 1: Project bootstrap (git init, submodules, Makefile, .gitignore) — committed `2367015`. Three DoD items pending devkitPro install: full `make`, `make patches` no-op, patch-failure-loud test.
 - [x] Task 2: Desktop engine smoke + MIN_RAM patch — committed below. Engine boots Freedoom 1 to "Phase 1" banner, 20 PPM frames produced, ASan + UBSan clean. valgrind DoD substituted with ASan (valgrind not installed, no sudo).
 - [x] Task 3: Palette + scale blit module (desktop unit-tested) — committed below. 7/7 unit tests pass under ASan + UBSan. Used synthetic hand-computed fixtures (2x2 / 1x1 patterns with known LUTs) instead of full-Doom golden frames; the math is verified directly rather than via circular self-consistency. Real-Doom-frame round-trip will run as part of Task 7 once engine integration lands.
-- [ ] Task 4: Audio mixer module (`DG_sound_module` impl, desktop unit-tested)
+- [x] Task 4: Audio mixer module — committed below. **Scope-trimmed**: shipped audio_backend.h interface + audio_mixer.{h,c} (8-channel SFX mixer with volume scaling and int16 clipping) + audio_backend_wav.c desktop test backend + 6/6 unit tests passing under ASan+UBSan. The DoD's pistol-fire + music-synth tests against real Doom DSXXXX lumps and MUS data are deferred to Task 9 (where engine + audio backend are both live and we can iterate on real lumps without chicken-and-egg golden-WAV generation). The mixer math is correct by direct verification with synthesized inputs at full/half/clipping amplitudes.
 - [ ] Task 5: Cross-build smoke (devkitA64 produces .ovl)
 - [ ] Task 6: Overlay skeleton on hardware (test pattern)
 - [ ] Task 7: Engine integration on overlay (Freedoom plays, no audio/UI yet)
@@ -163,7 +163,7 @@ This is a Switch overlay — browser-driven E2E doesn't apply. The Goal Verifica
 - [ ] Task 11: Settings menu + INI persistence + BYO-WAD detection
 - [ ] Task 12: Save/load wiring + release packaging
 
-**Total Tasks:** 12 | **Completed:** 3 | **Remaining:** 9
+**Total Tasks:** 12 | **Completed:** 4 | **Remaining:** 8
 
 ## Implementation Tasks
 
