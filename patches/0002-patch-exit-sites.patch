@@ -1,0 +1,93 @@
+From: chase <gober.chase@gmail.com>
+Subject: [PATCH 0002] Convert i_system.c exit() sites to setjmp/longjmp
+
+In an Ultrahand overlay, exit() from engine code terminates the entire
+nx-ovlloader sysmodule. This patch replaces the 5 exit() calls in
+i_system.c with longjmp(g_doom_error_jmp, code) so engine errors become
+survivable. The shim defines g_doom_error_jmp and sets it via setjmp()
+before calling doomgeneric_Create.
+
+In our build (no ORIGCODE, no DJGPP), only ONE exit() actually fires —
+the one at the I_Error tail in the #else branch (line 6 in the value
+mapping below). The other four are gated by build flags we don't enable;
+patched anyway for defense-in-depth.
+
+Long-jmp values:
+  2 = clean quit (I_Quit)
+  3 = recursive I_Error
+  4 = DJGPP path (not used in our build)
+  5 = I_Error tail (ORIGCODE, not used)
+  6 = I_Error tail (our build path — THIS is the active one)
+
+Verified: desktop smoke test produces 20 PPM frames after patch applied;
+engine boots Freedoom 1, runs 200 ticks, exits cleanly via DG_DrawFrame
+tick limit. The longjmp path is exercised separately by triggering an
+intentional I_Error.
+
+This patch must be applied AFTER patches/0001-lower-min-ram.patch.
+apply-patches.sh enforces this via lexical order of the patch filenames.
+
+---
+diff --git a/doomgeneric/i_system.c b/doomgeneric/i_system.c
+index 2490d76..2a2a83d 100644
+--- a/doomgeneric/i_system.c
++++ b/doomgeneric/i_system.c
+@@ -30,6 +30,15 @@
+ #include <unistd.h>
+ #endif
+ 
++/* sx-doom-overlay: longjmp recovery for engine errors.
++ * The shim layer (source/doomgeneric_switch.c) defines this jmp_buf and sets
++ * it via setjmp() in DoomGui::initServices() before calling doomgeneric_Create.
++ * Engine error paths longjmp back instead of calling exit(), so the overlay
++ * sysmodule stays alive when chocolate-doom hits Z_Init OOM, missing WAD,
++ * or any I_Error path. Long-jmp values: 2=clean quit, 3..6=error variants. */
++#include <setjmp.h>
++extern jmp_buf g_doom_error_jmp;
++
+ #ifdef ORIGCODE
+ #include "SDL.h"
+ #endif
+@@ -260,8 +269,9 @@ void I_Quit (void)
+ #if ORIGCODE
+     SDL_Quit();
+ 
+-    exit(0);
++    longjmp(g_doom_error_jmp, 2);  /* sx-doom-overlay: was exit(0) — clean quit */
+ #endif
++    longjmp(g_doom_error_jmp, 2);  /* sx-doom-overlay non-ORIGCODE: also bail to shim */
+ }
+ 
+ #if !defined(_WIN32) && !defined(__MACOSX__) && !defined(__DJGPP__)
+@@ -367,8 +377,9 @@ void I_Error (char *error, ...)
+     {
+         fprintf(stderr, "Warning: recursive call to I_Error detected.\n");
+ #if ORIGCODE
+-        exit(-1);
++        longjmp(g_doom_error_jmp, 3);  /* sx-doom-overlay: was exit(-1) */
+ #endif
++        longjmp(g_doom_error_jmp, 3);  /* sx-doom-overlay non-ORIGCODE: also bail */
+     }
+     else
+     {
+@@ -451,7 +462,7 @@ void I_Error (char *error, ...)
+ #elif defined(__DJGPP__)
+     {
+         printf("%s\n", msgbuf);
+-        exit(-1);
++        longjmp(g_doom_error_jmp, 4);  /* sx-doom-overlay: was exit(-1) */
+     }
+ 
+ #else
+@@ -464,9 +475,9 @@ void I_Error (char *error, ...)
+ #if ORIGCODE
+     SDL_Quit();
+ 
+-    exit(-1);
++    longjmp(g_doom_error_jmp, 5);  /* sx-doom-overlay: was exit(-1) — ORIGCODE path */
+ #else
+-    exit(-1);
++    longjmp(g_doom_error_jmp, 6);  /* sx-doom-overlay: was exit(-1) — our build path (THIS one fires) */
+ #endif
+ }
+ 

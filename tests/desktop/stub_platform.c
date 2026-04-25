@@ -25,10 +25,18 @@
 #include <stdbool.h>
 #include <time.h>
 #include <unistd.h>
+#include <setjmp.h>
 
 #include "../../lib/doomgeneric/doomgeneric/doomgeneric.h"
 #include "../../lib/doomgeneric/doomgeneric/doomkeys.h"
 #include "../../lib/doomgeneric/doomgeneric/i_video.h"
+
+/* sx-doom-overlay: longjmp recovery target referenced by i_system.c.
+ * On the real overlay, the shim layer defines this and sets it via setjmp()
+ * before invoking doomgeneric_Create. Here in the desktop smoke harness we
+ * provide it so the patched engine links and runs. On any error path the
+ * engine longjmps here; we report the value and exit cleanly. */
+jmp_buf g_doom_error_jmp;
 
 // --- Configuration (set in main from argv) -----------------------------------
 
@@ -180,6 +188,28 @@ int main(int argc, char** argv) {
         NULL
     };
     int engine_argc = 5;
+
+    /* sx-doom-overlay: setjmp checkpoint for engine error recovery.
+     * The patched i_system.c uses longjmp(g_doom_error_jmp, code) instead
+     * of exit() — non-zero return from setjmp means the engine errored out
+     * and we should bail cleanly rather than terminating the whole sysmodule
+     * (which is what exit() did pre-patch). */
+    int err = setjmp(g_doom_error_jmp);
+    if (err != 0) {
+        const char* reasons[] = {
+            "(no error)",
+            "(unused)",
+            "clean quit (I_Quit)",
+            "recursive I_Error",
+            "DJGPP path",
+            "I_Error tail (ORIGCODE)",
+            "I_Error tail (our build path)"
+        };
+        const char* reason = (err >= 0 && err < 7) ? reasons[err] : "unknown";
+        fprintf(stderr, "[stub] engine longjmp received (code=%d, %s) — exiting cleanly\n",
+                err, reason);
+        return (err == 2) ? 0 : err;
+    }
 
     fprintf(stderr, "[stub] doomgeneric_Create (-iwad %s -mb 3)\n", argv[1]);
     doomgeneric_Create(engine_argc, engine_argv);
