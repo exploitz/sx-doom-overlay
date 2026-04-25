@@ -72,9 +72,24 @@ CFLAGS  := -O2 -g -Wall -Wno-unused-variable -Wno-unused-but-set-variable \
            -I$(DG_DIR)
 LDFLAGS := -lm
 
-.PHONY: all smoke smoke-valgrind clean check-wad check-patch
+.PHONY: all smoke smoke-valgrind smoke-asan clean check-wad check-patch test_blit
 
 all: $(SMOKE_BIN)
+
+# --- test_blit (Task 3 unit tests) ------------------------------------------
+TEST_BLIT_BIN := $(OUT_DIR)/test_blit
+test_blit: $(TEST_BLIT_BIN)
+	@echo "[test_blit] running unit tests..."
+	@$(TEST_BLIT_BIN)
+	@echo "[test_blit] OK"
+
+$(TEST_BLIT_BIN): test_blit.cpp $(ROOT)/source/blit.cpp $(ROOT)/source/blit.hpp | $(OUT_DIR)
+	@echo "[compile] $(TEST_BLIT_BIN)"
+	@g++ -std=c++17 -O2 -g -Wall -Wextra -Werror \
+		-fsanitize=address,undefined \
+		-I$(ROOT)/source \
+		test_blit.cpp $(ROOT)/source/blit.cpp \
+		-o $(TEST_BLIT_BIN)
 
 # --- Patch application -------------------------------------------------------
 # We delegate to scripts/apply-patches.sh (the canonical applier). Idempotent
