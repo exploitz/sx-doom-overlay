@@ -1,0 +1,45 @@
+# Build artifacts
+build/
+out/
+dist/
+*.elf
+*.nro
+*.nso
+*.npdm
+*.nacp
+*.ovl
+*.nsp
+*.d
+*.o
+
+# devkitPro intermediates
+*.specs
+
+# Patch sentinel — produced by `make patches`, blown away on `make clean`
+lib/doomgeneric/.patched
+
+# Bundled WAD — copied into release zip from data/, but not tracked in git
+data/freedoom1.wad
+data/*.wad
+
+# Desktop test outputs
+tests/desktop/out/
+tests/desktop/*.wav
+tests/desktop/*.ppm
+tests/desktop/*.png
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Pilot internals
+.pilot/
+
+# Legacy reference clones (deleted in Task 1, but ignore in case they're re-cloned)
+Ultrahand-Overlay/
+_reference/

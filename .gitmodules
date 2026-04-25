@@ -1,0 +1,6 @@
+[submodule "lib/libultrahand"]
+	path = lib/libultrahand
+	url = https://github.com/ppkantorski/libultrahand.git
+[submodule "lib/doomgeneric"]
+	path = lib/doomgeneric
+	url = https://github.com/ozkl/doomgeneric.git
