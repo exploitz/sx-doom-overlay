@@ -14,7 +14,7 @@ Type: Feature
 
 **PRD:** `docs/prd/2026-04-25-doom-overlay.md` — read this for full context (problem, scope, constraints, risks).
 
-**Architecture:** `tsl::Overlay` → `tsl::Gui` → `tsl::elm::Element` skeleton (Tetris-Overlay pattern). The **engine + render path is single-threaded** (`DoomGui::update()` runs the 35 Hz Doom tick accumulator and calls `doomgeneric_Tick()` zero-or-more times; doomgeneric writes a 320×200 8-bit indexed buffer (`CMAP256`) into `DG_ScreenBuffer`; `DoomElement::draw()` does palette → RGBA4444 → integer-scale-blit into libtesla's framebuffer). **Audio runs on a separate libnx Thread** (priority 0x2c, 4 KB stack, started in Task 9) because `audoutAppendAudioOutBuffer` + `audoutWaitPlayFinish` is a blocking submit-and-wait pattern that would stall the 35 Hz tick if run on the main thread. The two threads communicate via a lock-free PCM ring buffer. Render scale (1× / 2× / 3×, default 2×) is selected at runtime via `cfg::FramebufferWidth`/`Height` (UltraGB-Overlay's `g_win_scale` pattern). The Doom palette is **pre-cached as 14 RGBA4444 banks at engine init** and switched per-frame via the platform shim's `DG_SetPalette` callback (damage flash, powerup tint, end-of-game fade). Heap budget is 8 MB system memory pool (anchored to nx-ovlloader's documented ceiling); a first-launch self-check refuses to start the engine when below.
+**Architecture (revised after deep research v2 — see `/tmp/prd-research-2-*.md`):** `tsl::Overlay` → `tsl::Gui` → `tsl::elm::Element` skeleton (Tetris-Overlay pattern, validated by UltraGB-Overlay as the only existing engine-in-overlay precedent). **Hybrid threading model:** the engine tick + render path runs synchronously inside libtesla's `update()` / `draw()` callbacks (`DoomGui::update()` runs the 35 Hz Doom tick accumulator and calls `doomgeneric_Tick()` zero-or-more times; doomgeneric writes a 320×200 8-bit indexed buffer (`CMAP256`) into `DG_ScreenBuffer`; `DoomElement::draw()` does palette → RGBA4444 → integer-scale-blit). **Audio runs on a dedicated libnx Thread** (priority 0x2C, 4 KB stack — exactly UltraGB-Overlay's pattern from `gb_audio.h:1376-1395`), submitting via **non-blocking** `audoutAppendAudioOutBuffer` + own `svcSleepThread` for pacing — NOT the blocking `audoutPlayBuffer` (UltraGB confirms this distinction matters). Coexists with libultrahand's `backgroundSoundThread` via the shared `ult::Audio::m_audioMutex`. Communication between threads is a lock-free SPSC PCM ring (4 × 4 KB DMA-aligned chunks, 22050 Hz 16-bit stereo). **Render path is direct framebuffer writes** via `renderer->getCurrentFramebuffer()` to RGBA4444 block-linear memory (UltraGB-Overlay pattern from `gb_renderer.h:20`, `:106`, `:683`) — NOT `setPixelAtOffset` (too slow for hot path). NEON `vst1q_u16` 8-pixel stores for the inner blit loop. Render scale (1× / 2× / 3×, default 2×) is selected at runtime via `cfg::FramebufferWidth`/`Height`. Doom palette is pre-cached as 14 RGBA4444 banks at engine init and switched per-frame via `extern colors[256]` + `palette_changed` flag. **Engine error recovery:** doomgeneric's 5 `exit()` sites in `i_system.c` (L262/369/453/466/468) are patched to `setjmp/longjmp` + `tsl::notification` toast — without this, *any* `I_Error` in the engine kills the entire nx-ovlloader sysmodule (Agent D empirical finding). **Heap budget is 8 MB target** but the empirical ceiling is ~10–12 MB via the hidden `custom_overlay_memory_MB` INI override (Agent D confirms UltraGB ships a 10 MB tier). On insufficient heap we show a `tsl::notification` toast (UltraGB pattern), not a blocking error screen.
 
 **Tech stack:** C99 (engine), C++26 (overlay shim, libtesla convention), devkitA64 / libnx, libultrahand (libtesla + libultra), doomgeneric (vendored as git submodule, with a `patches/` overlay), Freedoom Phase 1 (BSD-3, bundled in release zip).
 
@@ -54,6 +54,7 @@ Type: Feature
 - **Fork doomgeneric.** Rejected: maintenance burden. Submodule + patches/ keeps upstream tracking clean.
 - **Background thread for engine ticks.** Rejected: Tetris-Overlay and UltraGB-Overlay both ship single-threaded; threading inside an overlay adds complexity without clear benefit.
 - **Default ARGB engine output instead of CMAP256.** Rejected: ARGB costs 192 KB more heap with no functional benefit.
+- **`lantus/chocolate-doom-nx-master` (the SDL-based Switch port a friend was experimenting with in parallel).** **Empirically rejected** by deep-research finding (see `/tmp/prd-research-2-chocdoom-failure.md`): chocolate-doom-nx is upstream chocolate-doom + minimal `__SWITCH__` glue, designed for foreground `.nro` apps with full Title Takeover memory. It depends on `SDL_INIT_VIDEO`, `SDL_OpenGL`, and `SDL_mixer`, all of which need permissions that the overlay applet **does not have** (`nvdrv:a` mask `0x10A9` vs full apps' `0xA83B` per switchbrew.org — the `nvhost-gpu` + GL context bits are not in the overlay's mask; `audren:u` for SDL_mixer is also missing). On engine init, `SDL_INIT_VIDEO` fails first → `I_Error` → `exit(-1)` → entire overlay process terminates. There is no fix that keeps SDL; a "chocolate-doom-nx that works in an overlay" would have to be rewritten to be functionally identical to doomgeneric (no SDL, pure CPU blit, libnx `audout`). UltraGB-Overlay validates this architecture — it's the only successful engine-in-overlay because it does exactly what doomgeneric does (no SDL, CPU blit, audout).
 
 ## Context for Implementer
 
@@ -66,7 +67,7 @@ Type: Feature
 - **libultrahand makefile entry** — including `lib/libultrahand/ultrahand.mk` from our root Makefile pulls in libtesla + libultra build rules. Pattern from `_reference/Tetris-Overlay/Makefile:66`.
 - **Overlay class skeleton** — model on Tetris-Overlay's `class TetrisGui : public tsl::Gui` (source/main.cpp:1194). Override `createUI()` and `update()`. `tsl::loop<DoomOverlay, LaunchFlags::None>` is the entire `main()`.
 - **Runtime framebuffer scale pattern** — UltraGB-Overlay sets `ult::DefaultFramebufferWidth = static_cast<u32>(GB_W * g_win_scale)` (source/main.cpp:2978). We do the same with `DOOM_W = 320, DOOM_H = 200`. Read `g_render_scale` from the INI on overlay init, before the libtesla layer is created.
-- **Pixel write primitive** — libtesla's `Renderer::setPixelAtOffset` (`lib/libultrahand/libtesla/include/tesla.hpp:1291`) is the fast path; per-pixel `setPixelBlendDst` is too slow for full-screen blit. Do not use `drawRect` for pixel data (Tetris does that for its 10×20 board, not for an N×M framebuffer).
+- **Pixel write primitive — UPDATED post-research (UltraGB pattern):** call `renderer->getCurrentFramebuffer()` to get a `uint16_t*` to libtesla's RGBA4444 framebuffer in block-linear memory, then write directly with NEON `vst1q_u16` 8-pixel stores. This is what UltraGB does (`gb_renderer.h:20`, `:106`, `:683`). Bypasses the `setPixel*` API entirely. The plan's earlier reference to `setPixelAtOffset` was correct as a *fallback* but slower; production hot path is direct FB write. Block-linear swizzle handled via lookup tables: `framebuffer[s_row_lut[oy] + s_col_lut[ox]] = packed_color;`. Do not use `drawRect` for pixel data (Tetris does that for its 10×20 board, not for an N×M framebuffer).
 - **Build flags** (from Tetris-Overlay's Makefile) — `-std=c++26 -fno-exceptions -fno-rtti -flto=6 -Wl,-wrap,__cxa_throw`, plus `-DUSE_EXCEPTION_WRAP=1`. doomgeneric is C99 — the shim layer is C++.
 - **SD card paths** —
   - `/switch/.overlays/sx-doom-overlay.ovl` (the overlay itself)
@@ -95,15 +96,69 @@ Not applicable — this is a Switch homebrew overlay, not a service. Test paths:
 - **A6 — Ultrahand's settings UI 8 MB option does not regress in any future Ultrahand release.** The `4 / 6 / 8 MB` ladder is documented; if it changes, our error-screen UX may become stale text. Low risk. — Task 10 depends.
 - **A7 — Switch SD-card random-read latency is < 30 ms per lump.** Standard SD class 10 spec. Lump fetches dominate level-transition latency. — Task 7.
 
+## Research v2 — Empirical Findings (added 2026-04-25 after Ethan's chocolate-doom-nx attempt)
+
+Four parallel research agents (A: chocolate-doom-nx failure, B: UltraGB architecture, C: Doom port catalog, D: empirical overlay constraints) — full reports at `/tmp/prd-research-2-*.md`. Key findings now baked into the plan:
+
+1. **chocolate-doom-nx is empirically dead-end for overlays.** It depends on SDL2 video / SDL_OpenGL / SDL_mixer; the overlay's `nvdrv:a` permission mask (`0x10A9` per switchbrew.org) lacks the GL bits, and `audren:u` is missing for SDL_mixer. `SDL_INIT_VIDEO` fails first → `I_Error` → `exit(-1)` → entire overlay sysmodule dies. (This is exactly Ethan's UltraDoom crash signature.) No code changes can fix this without rewriting chocolate-doom-nx to be functionally identical to doomgeneric.
+
+2. **`samar-01/doomswitch` (Nov 2024) is the only published doomgeneric Switch fork — and `DG_DrawFrame()` is empty.** Top 200 forks of ozkl/doomgeneric have ZERO completed Switch ports. **Our work is genuinely first-of-kind.**
+
+3. **`cappuch/doomgeneric-3ds` (June 2025) is the cleanest structural template** for our `doomgeneric_switch.c` glue — same 5 `DG_*` hooks, retargets to libnx in obvious ways. Reference during Task 7.
+
+4. **Empirical heap ceiling is ~10–12 MB**, not the documented 8 MB. UltraGB-Overlay README documents a working "10 MB+" tier; `nx-ovlloader/source/main.c::isValidHeapSize` only checks 2 MB alignment, no upper bound. The kernel returns `0x10801: Memory resource limit reached` somewhere above 10–12 MB on a memory-pressed game. Our 8 MB target is conservative; users can opt into more via the hidden INI key without us depending on it.
+
+5. **`exit()` and `I_Error` are THE primary blocker for engine-in-overlay** (Agent D). Calling `exit()` from inside an overlay terminates the entire nx-ovlloader sysmodule. doomgeneric's `i_system.c` has 5 `exit()` sites (L262/369/453/466/468). **Patches/0002 must convert these to `setjmp/longjmp` + log path** — alongside the existing MIN_RAM patch.
+
+6. **`audoutInitialize` from a hosted overlay is empirically robust.** UltraGB-Overlay ships it (`gb_audio.h:1083-1272`). Earlier "audio coexistence unproven" caveat is contradicted; expected behavior is success on most HOS+game combos.
+
+7. **`nv:` and threading work in the overlay context.** Status-Monitor-Overlay calls `nvInitialize()` and spawns multiple sampling threads. UltraGB spawns its dedicated audio thread. Up to 3+ worker threads documented in production overlays.
+
+8. **WAD size > heap size is the second blocker.** Doom2 IWAD is 14 MB; max workable heap is ~10–12 MB. Engine MUST use lazy lump caching (`PU_CACHE`), not full-load. doomgeneric does this by default; just need to verify the reads don't bypass cache.
+
+9. **HOS 22 (April 2026) breaks nx-ovlloader 2.0.0** via libnx upstream commit `fdf3c87` (Ultrahand-Overlay/issues/305). **Action item: verify Chase's HOS version before deploying.**
+
+10. **`/atmosphere/crash_reports/*.bin` files are unreadable without the CrashLogger sysmodule.** **Action item for Ethan and Chase: install CrashLogger before Task 6 hardware testing** so any crash gives us a real stack trace, not a silent `.bin` file.
+
+11. **Heap-too-small: use `tsl::notification` toast, not a blocking error screen** (UltraGB pattern from `main.cpp:338-353`). User can keep navigating; per-tier message tells them what to bump to.
+
+12. **Render path: direct framebuffer write via `renderer->getCurrentFramebuffer()`**, not `setPixelAtOffset` (UltraGB `gb_renderer.h:20`). Block-linear RGBA4444. NEON `vst1q_u16` for hot path.
+
+13. **Audio submission: NON-blocking `audoutAppendAudioOutBuffer` + own `svcSleepThread`**, not blocking `audoutPlayBuffer` (UltraGB `gb_audio.h:1330-1395`). Coexist with libultrahand's `backgroundSoundThread` via `ult::Audio::m_audioMutex`.
+
+14. **No `AppletHookCookie` needed** — use libtesla's `Overlay::onHide` / `onShow` lifecycle hooks directly (UltraGB `main.cpp:2667-2855`). Simpler.
+
+## What Transfers From Ethan's UltraDoom-Overlay Work
+
+Ethan's `UltraDoom-Overlay` engine layer (chocolate-doom-nx) is a dead end (research finding #1) — but a substantial portion of his work is directly applicable to the doomgeneric path and saves us reimplementation:
+
+- **Project Makefile structure** — his `lib/libultrahand` junction pattern, `SDL_EXCLUDE` filtering approach, link order. Adapt to Linux/WSL paths but keep the structure.
+- **`source/doom_input.hpp`** — HID → Doom keycode mapping table. Directly reusable; the engine target doesn't change input semantics.
+- **`source/doom_globals.hpp`** — shared state declarations (`g_hid_keys_held/down/up` atomics, paths). Reusable as-is; only the framebuffer plumbing changes (we use direct FB write instead of his shared FB + mutex).
+- **`Overlay::handleInput`** atomic-write pattern — feeds the same key queue regardless of engine.
+- **NACP / project metadata** — title, author, version conventions.
+- **Aspect-correct rendering insight** (448×336 viewport for 4:3 DOS pixels) — captured in Deferred Ideas; v2 enhancement.
+- **`error.log` capture pattern** — funneling stderr to a file for post-mortem.
+- **SD-card path conventions** — `sdmc:/roms/doom/`, `sdmc:/config/<overlay>/`, etc.
+
+What does NOT transfer:
+- chocolate-doom-nx-master engine code (replaced with doomgeneric submodule + patches)
+- The shared-framebuffer + `g_doom_fb_mutex` pattern (replaced with direct FB write inside `Element::draw`)
+- D_DoomMain-on-dedicated-thread design (replaced with single-threaded engine loop in `update()`)
+- chocolate-doom's save-path code (Doom save format is identical, but the path-construction calls differ between engines)
+
 ## Risks and Mitigations
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| `audout` exclusive on user's HOS+game combo at *init time*, `audoutInitialize` fails. | Medium | Medium | `DG_sound_module->Init` returns false on `audoutInitialize` failure; doomgeneric falls back to silent automatically. One-time toast informs user. (Task 9 DoD covers this branch.) |
-| `audout` *submit-time* failure — init succeeded but a foreground game later acquires the device exclusively, causing `audoutAppendAudioOutBuffer` to fail mid-gameplay. | Medium | Low | Audio thread checks every submit return code; on failure, sets `g_audio_failed`, drains ring, exits cleanly. `DG_sound_module->Update` short-circuits to no-op. Same one-time toast. Engine continues at 35 Hz unaffected. (Task 9 DoD covers this branch.) |
+| `audout` exclusive on user's HOS+game combo at *init time*, `audoutInitialize` fails. | **Low** (downgraded — UltraGB ships this path successfully) | Medium | `DG_sound_module->Init` returns false on `audoutInitialize` failure; doomgeneric falls back to silent automatically. One-time toast informs user. (Task 9 DoD covers this branch.) |
+| `audout` *submit-time* failure — init succeeded but a foreground game later acquires the device exclusively, causing `audoutAppendAudioOutBuffer` to fail mid-gameplay. | Low | Low | Audio thread checks every submit return code; on failure, sets `g_audio_failed`, drains ring, exits cleanly. `DG_sound_module->Update` short-circuits to no-op. Same one-time toast. Engine continues at 35 Hz unaffected. (Task 9 DoD covers this branch.) |
+| **Engine `exit()` / `I_Error` kills the entire nx-ovlloader sysmodule** (not just the overlay). | **High** (THE primary blocker — confirmed by Ethan's UltraDoom crash) | **Critical** | `patches/0002-patch-exit-sites.patch` (added in Task 2) converts the 5 `exit()` sites in `i_system.c` (L262/369/453/466/468) and the `I_Error` body to `setjmp/longjmp` + `tsl::notification` toast. Engine errors become survivable. Without this patch, ANY engine error (Z_Init OOM, missing WAD, bad lump) terminates the user's overlay system. |
+| **HOS 22 (April 2026) breaks nx-ovlloader 2.0.0** via libnx upstream commit `fdf3c87` (Ultrahand-Overlay/issues/305). | Medium | High | Verify Chase's HOS version before deploying. If on HOS 22, wait for nx-ovlloader 2.0.1+ or pin libnx in our build. Document in README. |
+| **Crash reports unreadable without CrashLogger sysmodule.** Default Atmosphère writes binary `.bin` files we can't read. | Low | Medium | **Action: Chase + Ethan install CrashLogger sysmodule** (https://github.com/p-sam/switch-crashlogger) before Task 6 hardware testing. CrashLogger writes human-readable `.log` files. README install instructions to include this step. |
 | **Sleep mid-save:** Switch suspends between fwrite calls, truncating the `.dsg` save file. | Low | Medium | Task 12 wraps Doom's save write with atomic write (`fwrite` to `doomsavN.dsg.tmp`, `fsync`, `rename` to `doomsavN.dsg`). Verified by intentionally killing the process mid-save in a desktop test. |
 | **SD card pulled mid-lump-read** during level transition or mid-gameplay sprite fetch. | Low | Low | Documented as known limitation; doomgeneric's `W_LumpLength` / `W_ReadLump` short-read produces an `I_Error` — engine shows its own error screen rather than corrupting state. We do not catch or recover. |
-| **Multi-overlay audout conflict:** user opens DoomOverlay, then summons Ultrahand and opens a second overlay; on returning to Doom the audio thread state may be indeterminate. | Low | Low | The same `AppletHookCookie` resume path used for sleep/wake also triggers on overlay re-summon — drops the audio ring and reinits `audoutStartAudioOut`. If reinit fails, falls into the silent-fallback path. |
+| **Multi-overlay audout conflict:** user opens DoomOverlay, then summons Ultrahand and opens a second overlay; on returning to Doom the audio thread state may be indeterminate. | Low | Low | `Overlay::onHide()` pauses audio; `Overlay::onShow()` re-anchors wall-clock and reinits `audoutStartAudioOut`. If reinit fails, falls into the silent-fallback path. (UltraGB pattern; no AppletHookCookie needed.) |
 | `MIN_RAM = 3` proves too tight for Freedoom 1 — engine `Z_Malloc` fails mid-level. | Medium | High | Profile zone usage in Task 7 with the heaviest Freedoom levels. If hitting OOM, raise to `MIN_RAM = 4` and shrink something else (drop scale 3× option, smaller audio buffer). Documented as a tunable, not a hardcode. |
 | libtesla 2×-scale composite cost > 35 Hz budget on Erista undocked. | Medium | Medium | Task 7 includes a per-frame timer log. If 2× misses 35 Hz, default falls back to 1× (the 320×200 framebuffer is trivially fast). User can manually pick 2× or 3× anyway. |
 | Patch on doomgeneric (`MIN_RAM`) doesn't apply cleanly on submodule update. | Low | Low | `make patch` step uses `git apply --check` first; if it fails, build halts with a clear "patches need re-roll" message. Patches are 5 lines — re-rolling takes minutes. |
@@ -243,6 +298,7 @@ This is a Switch overlay — browser-driven E2E doesn't apply. The Goal Verifica
 **Files:**
 
 - Create: `patches/0001-lower-min-ram.patch` (changes `DEFAULT_RAM 6` → `3` and `MIN_RAM 6` → `3` in `lib/doomgeneric/doomgeneric/i_system.c:58-59`)
+- **Create: `patches/0002-patch-exit-sites.patch`** (NEW post research v2 — critical) — converts the 5 `exit()` sites in `i_system.c` (L262, L369, L453, L466, L468) and the `I_Error` body to `setjmp/longjmp` + `fprintf(g_doom_error_log, ...)`. Without this, any `I_Error` in doomgeneric (Z_Init OOM, missing WAD, bad lump, etc.) calls `exit()` and terminates the entire nx-ovlloader sysmodule — *not just our overlay*. Engine errors become survivable: jump back to a `setjmp` checkpoint in `DoomGui::initServices`, log the error, show a `tsl::notification` toast, and the overlay UI stays alive so the user can dismiss it cleanly.
 - Create: `tests/desktop/Makefile` (Linux build of doomgeneric with stub renderer that dumps PPM frames)
 - Create: `tests/desktop/stub_platform.c` (fills the 6 `DG_*` shim functions: PPM frame dump for `DG_DrawFrame`, `usleep` for `DG_SleepMs`, `clock_gettime` for `DG_GetTicksMs`, stdin scancode-to-DOOMKEY for `DG_GetKey`)
 
@@ -526,7 +582,7 @@ Document the confirmed behavior in a `LIFECYCLE_NOTES.md` file at the project ro
 
 **Files:**
 
-- Modify: `source/audio_backend_libnx.c` — `audoutInitialize`, `audoutStartAudioOut`, dedicated audio thread that drains the ring buffer and submits via `audoutAppendAudioOutBuffer` + `audoutWaitPlayFinish`. **Both calls are wrapped: a non-zero return code sets a `g_audio_failed` atomic flag, drains the ring, and exits the thread cleanly.**
+- Modify: `source/audio_backend_libnx.c` — `audoutInitialize`, `audoutStartAudioOut`, dedicated audio thread that drains the ring buffer and submits via **non-blocking** `audoutAppendAudioOutBuffer` + own `svcSleepThread` for pacing (UltraGB pattern from `gb_audio.h:1330-1395` — explicitly NOT the blocking `audoutPlayBuffer`). Coexist with libultrahand's `backgroundSoundThread` via `ult::Audio::m_audioMutex` (a recursive mutex from libultrahand's audio module). Pre-queue 2 silence frames for ~33 ms headroom against jitter. Return-code check on every submit; non-zero sets `g_audio_failed`, drains ring, exits thread.
 - Modify: `source/i_sound_switch.c` — `DG_sound_module->Init` returns false on backend init failure; doomgeneric falls back to silent. Also: `DG_sound_module->Update` checks `g_audio_failed` each call and short-circuits to no-op if set (so the engine doesn't keep mixing into a doomed ring).
 - Modify: `source/main.cpp` — emit a one-time `tsl::notification` toast when audio init fails OR when the audio thread sets `g_audio_failed` due to a submit-time failure. The toast text is the same in both cases ("Audio unavailable — game continues silent").
 
@@ -534,7 +590,7 @@ Document the confirmed behavior in a `LIFECYCLE_NOTES.md` file at the project ro
 
 - Audio thread: libnx `Thread` at priority 0x2c, 4 KB stack, mirrors Tetris-Overlay's pattern (consult `lib/libultrahand` for current libtesla audio examples; the deleted Tetris reference used the same approach).
 - Ring buffer: 4 × 1024-frame chunks of 16-bit stereo at 22050 Hz ≈ 16 KB total. Single-producer / single-consumer — atomic head/tail indices, no mutex needed.
-- Sleep/wake: register an `AppletHookCookie` for resume events; on resume, drop the audio ring and reinit `audoutStartAudioOut`. Prevents the sys-tune-style desync. If reinit fails, follow the same `g_audio_failed` path as a submit-time failure.
+- **Sleep/wake — UPDATED (UltraGB pattern):** do NOT use `AppletHookCookie` (UltraGB confirms it isn't needed). Instead override `Overlay::onHide()` and `Overlay::onShow()` directly — `onHide` pauses audio and sets the "running" flag false; `onShow` re-anchors the wall-clock anchor and resumes (UltraGB `main.cpp:2667-2855`). On resume, if `audoutStartAudioOut` fails, follow the same `g_audio_failed` path as a submit-time failure.
 - Output sample rate: 22050 Hz mono → upsample to 48000 Hz stereo if the audout service requires it (libnx may negotiate). Confirm during implementation.
 - Coexistence test: with `super-mario-odyssey.nsp` running, summon overlay, expect either (a) audio plays alongside the game, (b) `audoutInitialize` fails and we silently fall back, or (c) init succeeds but a later submit fails because the game grabs the device — also handled by the silent-fallback path. All three are acceptable for v1; document which case held in the verify report.
 
@@ -554,9 +610,9 @@ Document the confirmed behavior in a `LIFECYCLE_NOTES.md` file at the project ro
 
 ---
 
-### Task 10: Heap-too-small error screen + first-launch self-check
+### Task 10: Heap-too-small toast + first-launch self-check (revised post-research v2)
 
-**Objective:** Read `g_heapSize` (or equivalent libtesla-exposed value) at overlay init; if below 8 MB, refuse to start the engine and show a clear `tsl::Gui` error screen with remediation instructions. Never auto-write `heap_size.bin`.
+**Objective:** Detect heap tier at overlay init (using libultrahand's `ult::limitedMemory` / `ult::expandedMemory` / `ult::furtherExpandedMemory` flags — UltraGB pattern from `main.cpp:338-353`); if below 8 MB, **show a `tsl::notification` toast** (NOT a blocking error screen) with the per-tier remediation message; refuse to start the Doom engine but keep the overlay UI navigable. Never auto-write `heap_size.bin`.
 **Dependencies:** Task 7 (we need the engine init path to gate)
 **Mapped Truths:** T5
 
@@ -680,6 +736,7 @@ None at this stage — all major decisions are resolved either in the PRD or in 
 
 ## Deferred Ideas
 
+- **Aspect-correct rendering (1.2× vertical stretch)** — Doom's original DOS pixels are 4:3, not square. 320×200 displayed at square 1× scale looks horizontally stretched on a modern panel. Ethan's UltraDoom plan uses a 448×336 viewport that effectively does aspect correction. Our v1 ships square-pixel output (1×, 2×, 3× integer scale of 320×200) for simplicity; aspect-correct mode is a v2 enhancement that requires fractional vertical scaling (e.g., 2× horiz × 2.4× vert) and a corresponding update to the blit module. Worth adding once the foundation is proven on hardware. Captured here as a Deferred Idea so we don't lose the insight.
 - **NEON-accelerated blit** — scalar reference is fine for v1 budget; NEON kernels for `blit_doom_to_rgba4444` would shave headroom but aren't required.
 - **OPL2 / OPL3 music synth** — Doom's MUS music sounds best with hardware FM synthesis. Software MIDI fallback is acceptable for v1; OPL emulation is a quality bump for v2.
 - **Per-weapon haptic profiles** — vibration is a binary toggle in v1; per-weapon rumble patterns is a polish item.
