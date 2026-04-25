@@ -76,7 +76,24 @@ cp "$README_PATH" "$STAGE_DIR/README.md"
 
 bold "==> Zipping"
 rm -f "$ZIP_PATH"
-( cd "$STAGE_DIR" && zip -r "$ZIP_PATH" . -q )
+# Prefer the `zip` binary if available; fall back to python3's zipfile module
+# (which is part of the stdlib and usually available even on minimal systems).
+if command -v zip >/dev/null 2>&1; then
+    ( cd "$STAGE_DIR" && zip -r "$ZIP_PATH" . -q )
+elif command -v python3 >/dev/null 2>&1; then
+    echo "    (using python3 zipfile — install 'zip' for faster zipping)"
+    ( cd "$STAGE_DIR" && python3 -c "
+import os, sys, zipfile
+with zipfile.ZipFile('$ZIP_PATH', 'w', zipfile.ZIP_DEFLATED) as z:
+    for root, dirs, files in os.walk('.'):
+        for f in files:
+            p = os.path.join(root, f)
+            z.write(p, os.path.relpath(p, '.'))
+" )
+else
+    err "Neither 'zip' nor 'python3' found. Install one: sudo apt install -y zip"
+    exit 1
+fi
 
 # --- Cleanup + report --------------------------------------------------------
 

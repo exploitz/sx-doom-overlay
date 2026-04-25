@@ -87,10 +87,17 @@ fi
 
 cp "$WAD_SRC" "$WAD_PATH"
 
-# Find the license file (Freedoom ships it as COPYING).
-LICENSE_SRC=$(find "$FREEDOOM_EXTRACT_DIR" -maxdepth 3 -iname 'COPYING' | head -1)
+# Find the license file (Freedoom ships it as COPYING / COPYING.txt / LICENSE).
+LICENSE_SRC=$(find "$FREEDOOM_EXTRACT_DIR" -maxdepth 3 \
+    \( -iname 'COPYING' -o -iname 'COPYING.txt' -o -iname 'LICENSE' -o -iname 'LICENSE.txt' \) \
+    -print -quit 2>/dev/null)
 if [ -n "$LICENSE_SRC" ] && [ -f "$LICENSE_SRC" ]; then
     cp "$LICENSE_SRC" "$LICENSE_PATH"
+    echo "    license: $(basename "$LICENSE_SRC") → $(basename "$LICENSE_PATH")"
+else
+    echo "    WARNING: no license file found in extract — release zip will lack LICENSE.freedoom"
+    echo "    Listing for debug:"
+    ls "$FREEDOOM_EXTRACT_DIR" 2>/dev/null | head -5
 fi
 
 # --- Verify ------------------------------------------------------------------
