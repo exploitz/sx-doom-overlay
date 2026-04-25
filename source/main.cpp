@@ -7,7 +7,17 @@
 // Licensed under GPLv2.
 
 #define NDEBUG
-#define STBTT_STATIC
+// libtesla single-header library convention — exactly ONE translation unit
+// in the project must define TESLA_INIT_IMPL before including tesla.hpp.
+// That one TU emits the implementation symbols (tsl::cfg::FramebufferWidth,
+// launchCombo, the libnx __appInit/__appExit overrides, the stb_truetype
+// implementation, etc.). main.cpp is the canonical place for it.
+//
+// We do NOT define STBTT_STATIC here even though Tetris-Overlay does —
+// libtesla's tesla.cpp source unit calls stbtt_FindGlyphIndex directly,
+// so the stb_truetype symbols MUST be externally visible (extern linkage).
+// STBTT_STATIC makes them static-linkage = TU-local, which breaks the link.
+#define TESLA_INIT_IMPL
 
 #include <tesla.hpp>
 
