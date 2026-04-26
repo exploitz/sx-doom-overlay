@@ -40,6 +40,9 @@ Thumbs.db
 # Pilot internals
 .pilot/
 
+# Diagnostic pulls from sync-sd.sh (trace.log + crash reports per timestamp)
+diagnostics/
+
 # Legacy reference clones (deleted in Task 1, but ignore in case they're re-cloned)
 Ultrahand-Overlay/
 _reference/

@@ -1,113 +1,125 @@
-# Session State — 2026-04-25
+# Session State — 2026-04-25 (end of long session 1)
 
-Snapshot of project state at end of the first long working session.
-Read this first when resuming.
+Snapshot for resuming after a context clear. **Read this first.**
 
-## What works
+## TL;DR
 
-- **Build pipeline end-to-end.** `make` produces `out/sx-doom-overlay.ovl`
-  (~987 KB). `make dist` produces `dist/sx-doom-overlay-X.Y.Z.zip` with
-  the correct SD-card layout (`/switch/.overlays/sx-doom-overlay.ovl`,
-  `/switch/.overlays/doom/freedoom1.wad`, `LICENSE.freedoom`, README,
-  top-level LICENSE).
-- **Overlay loads on hardware.** No nx-ovlloader fault on launch.
-  libtesla UI renders. Default 448×720 framebuffer; Doom drawn centered
-  at 1× scale (320×200 in the middle of that buffer).
-- **Engine boots and renders Freedoom 1 title screen.** doomgeneric_Create
-  succeeds (~2.8 sec on hardware), 4-byte struct `colors[]` palette
-  read works (BGRA byte order), RGBA4444 packing works (r=bits 0-3,
-  a=bits 12-15), block-linear FB writes via `Renderer::setPixel`.
-- **Engine runs cleanly through the title screen** for the entire
-  `pagetic = 170` countdown (~5 seconds, 169 ticks).
-- **patches/0001-lower-min-ram.patch + patches/0002-patch-exit-sites.patch
-  apply cleanly via `scripts/apply-patches.sh`.** patches/0002 catches
-  Doom's `I_Error` paths via setjmp/longjmp so engine errors don't
-  terminate the entire nx-ovlloader sysmodule.
-- **Tracing infrastructure.** `sdmc:/config/sx-doom-overlay/trace.log`
-  receives per-tick log lines for ticks 0/35/70/105 plus every tick
-  130-200, plus engine-init checkpoints and longjmp recovery codes.
+Doom is **running on a real Switch** inside an Ultrahand overlay. E1M1
+loads, animations play, no crashes. Task 7 (engine integration) and
+Task 8 (input mapping) are both code-complete; Task 8 wasn't hardware-
+verified yet but built and pushed. Outstanding: input testing, audio
+(Task 9), heap-too-small toast (Task 10), settings UI (Task 11), save/
+load + release polish (Task 12).
 
-## What's broken
+## What works (verified on hardware)
 
-- **Atmosphère fault at tick 169** (5 sec into engine run, on title-to-
-  demo transition). Title sits for `pagetic=170` ticks then `D_AdvanceDemo`
-  fires, which kicks `G_DeferedPlayDemo("DEMO1")` → on the very next
-  tick `G_DoPlayDemo` runs `P_SetupLevel(E1M1)`. Crash is *during* tick
-  169's `doomgeneric_Tick()` call (last log line is "tick 169 → calling
-  Tick", no matching "Tick returned OK").
-- **Subsequent loads fail-fast** with `longjmp received code=6` (I_Error
-  during init, ~16ms into doomgeneric_Create). Resolved by hard-rebooting
-  the Switch (cold restart of nx-ovlloader's heap state).
+- **Build → push → run pipeline.** `make` produces `.ovl`, `make dist`
+  produces release zip. `scripts/sync-sd.sh` auto-detects the Switch's
+  SD card via either `/mnt/<letter>/` (Hekate UMS / card reader) OR
+  PowerShell + Shell COM API (DBI/MTP — Switch in Explorer as
+  `This PC\Nintendo Switch\SD Card\...`). Pushes new `.ovl` and pulls
+  trace.log + crash reports into `diagnostics/<timestamp>/`.
+- **Overlay loads cleanly.** No nx-ovlloader fault on launch.
+- **Engine boots E1M1 directly via `-warp 1 1 -skill 2`.** Title screen
+  + demo replay path **CRASHES** Atmosphère; bypassing it via -warp
+  works fine. `D_DoomMain`'s `autostart=true` path through P_SetupLevel
+  is solid; the crash was specific to the `G_DeferedPlayDemo →
+  G_DoPlayDemo` chain.
+- **Engine ticks at ~35 Hz** clean through hundreds of frames per
+  trace.log (latest run: tick 199 with no crashes).
+- **Rendering works.** Block-linear FB writes via libtesla
+  `Renderer::setPixel`. Palette LUT built once at init from
+  `colors[256]` (BGRA byte order; doomgeneric `struct color` has
+  bit-fields `b:8, g:8, r:8, a:8` which is BGRA on little-endian ARM).
+  RGBA4444 packing: r=bits 0-3, g=4-7, b=8-11, a=12-15.
+- **patches/0001 + patches/0002 apply cleanly** via
+  `scripts/apply-patches.sh`. 0001 lowers Doom MIN_RAM to 3 MiB. 0002
+  replaces 5 `exit()` sites in `i_system.c` with
+  `longjmp(g_doom_error_jmp, code)` so engine errors don't terminate
+  the entire nx-ovlloader sysmodule.
 
-## Hypothesis for the crash
+## What's known-broken / deferred
 
-Most likely **memory corruption inside `P_SetupLevel`** — its initial
-`Z_FreeTags(PU_LEVEL, PU_PURGELEVEL-1)` runs on a never-freed-before
-zone, plus the chain of ~12 `Z_Malloc(PU_LEVEL)` calls for vertices,
-segs, sectors, sides, lines, blockmap etc., plus `W_CacheLumpNum(PU_STATIC)`
-for level lumps. Any one of those silently corrupting zone metadata
-would lead to a SIGSEGV that bypasses our `I_Error` patch.
+- **Demo replay crashes Atmosphère**. After ~5 sec at title screen,
+  `D_AdvanceDemo → G_DeferedPlayDemo("DEMO1") → G_DoPlayDemo` hits a
+  fault somewhere. v1 mitigation: pass `-warp 1 1` so the engine never
+  enters the demo-replay path. Real fix needs CrashLogger sysmodule
+  (https://github.com/p-sam/switch-crashlogger) installed on the user's
+  Switch — produces readable `.log` files in `/atmosphere/crash_reports/`
+  with stack trace, register dump, faulting PC. **Not yet installed.**
+- **Sticks not yet wired** — only D-pad + buttons in input_map.hpp.
+  Adding stick→movement is straightforward; deferred.
+- **Audio** is `-nosound -nomusic` argv-disabled. Task 9 unimplemented.
+- **Heap-too-small toast** (Task 10) unimplemented; relies on user
+  having 8 MB heap set in Ultrahand Settings.
+- **Settings UI** (Task 11) unimplemented.
+- **Save/load** (Task 12) unimplemented; engine paths exist but not
+  wired to overlay UI.
 
-**Without a stack trace** (no CrashLogger sysmodule installed yet) we
-can't pin down which specific call. Every guess costs a hardware
-roundtrip.
+## Repo state
 
-## Two ways to break out next session
+12 commits this session (rough chain):
+- Tasks 1-4 complete (bootstrap, desktop engine smoke, palette+blit
+  module, audio mixer skeleton)
+- Plan v2 + PRD v2 (research v2 findings folded in)
+- Task 7 prep (patches/0002 — 5 exit()→longjmp conversions, validated)
+- Task 5 complete (cross-build smoke; build system fully wired)
+- Task 7 minimal viable engine integration on hardware
+- Color literal fix (0x000F red → 0xF000 black for fillScreen)
+- Block-linear FB swizzle fix (route blits through Renderer::setPixel)
+- -warp 1 1 -skill 2 to bypass demo-replay crash
+- MTP sync pipeline (sync-sd.sh + mtp-sync.ps1)
+- Task 8 input mapping (D-pad + buttons → Doom keys; sticks deferred)
 
-### A — Install CrashLogger sysmodule
+Latest commit: `5baa13b` (Task 8). Working tree clean except for
+.nvmrc (pre-existing untracked) and `diagnostics/` (gitignore TODO).
 
-https://github.com/p-sam/switch-crashlogger — drop-in sysmodule that
-writes human-readable `.log` files to `/atmosphere/crash_reports/`.
-Next crash gives us:
-- Faulting instruction's program counter
-- Register state at fault
-- Backtrace through the call chain
-- Decoded function names if symbols are present
+## Lessons learned (5 expensive ones)
 
-**One run after install = exact diagnosis.** Highest-leverage move.
+1. **libtesla framebuffer is block-linear (Tegra GPU swizzled).**
+   `cfg::FramebufferWidth/Height` overrides do NOT recompute the
+   swizzle constants. Stay on default 448×720; route writes through
+   `Renderer::setPixel` (correct swizzle by construction). Custom
+   non-default sizes need libtesla "windowed" mode, not yet
+   investigated.
+2. **`__nx_main_thread_stack_size` is a CONFIG SYMBOL, not an
+   override target.** libnx default 1 MiB; declaring `extern const u32`
+   with a smaller value SHRINKS the stack. Don't touch.
+3. **RGBA4444 + BGRA struct read both need consistent endianness.**
+   libtesla wants r in bits 0-3, a in bits 12-15. Doom's
+   `struct color {b:8;g:8;r:8;a:8}` on little-endian = BGRA byte order.
+   Both must match or you get pink-tint corruption + memory writes
+   to wrong addresses.
+4. **`-mb 6` is too tight in 8 MB heap.** Doom's `AutoAllocMemory`
+   I_Errors immediately if `malloc(6 MiB)` fails. -mb 4 is the working
+   value with libtesla framebuffer + libstdc++ overhead.
+5. **nx-ovlloader heap state is NOT cleanly reset on overlay crash.**
+   Every subsequent overlay launch fast-fails at `Z_Init` until a
+   hard reboot of the Switch. There's no shortcut. Always full power
+   cycle between diagnostic tests.
 
-### B — Patch out the demo loop
+## How to resume next session
 
-Quick `patches/0003-disable-demo-loop.patch` to make `D_AdvanceDemo`
-a no-op. Title screen sits forever, no demo init, no crash at tick 169.
-Result: stable "Freedoom title on Switch" build that proves the entire
-architecture works end-to-end. Then proceed to Task 8 (input mapping),
-which lets the user press Start → New Game on the menu, which goes
-through *a different* `P_SetupLevel` path that may or may not also
-crash. If it does, we're back to needing CrashLogger.
+1. **Read this file first.** Then read
+   `docs/plans/2026-04-25-doom-overlay.md` (Plan v2) and
+   `docs/prd/2026-04-25-doom-overlay.md` (PRD v2) for full context.
+2. Check `git log --oneline | head -20` for recent commits.
+3. Current branch is `main`; everything committed.
+4. To rebuild:
+   ```bash
+   export DEVKITPRO=/opt/devkitpro
+   export PATH=$DEVKITPRO/tools/bin:$DEVKITPRO/devkitA64/bin:$PATH
+   make
+   ```
+5. To deploy: `bash scripts/sync-sd.sh` (auto-detects MTP vs UMS).
+6. Test plan: hardware test Task 8 (does input actually move Doomguy
+   on E1M1?), then Task 9 (audio), then Tasks 10-12 in plan order.
 
-## Build state
+## Outstanding to-do
 
-- Latest commit: see `git log`. Recent commits:
-  - Task 7 minimal viable engine integration
-  - Multiple iteration commits with revert-and-fix cycles
-- `out/sx-doom-overlay.ovl` is current with all latest source.
-- `dist/sx-doom-overlay-0.0.1-bootstrap.zip` is current.
-
-## Open task list
-
-- Task 7 (engine integration): **in progress, blocked on crash**.
-- Tasks 8-12: pending, all depend on Task 7 stable.
-
-## Lessons learned this session
-
-1. **The libtesla framebuffer is block-linear** (Tegra GPU swizzled).
-   Setting `cfg::FramebufferWidth/Height` to non-default values does
-   NOT recompute the swizzle constants — pixels past x=447 land at
-   wrong addresses. **Stay on the default 448×720 framebuffer; draw
-   inside it.** Only way to support 2×/3× scale is libtesla's
-   "windowed" mode or a custom swizzle replacement.
-2. **`__nx_main_thread_stack_size` is a CONFIG SYMBOL, not an override
-   target** — libnx default is 1 MiB; declaring `extern const u32`
-   with a smaller value SHRINKS it. Don't touch unless you're growing.
-3. **Both `pack_rgba4444` color literals AND struct color reads need
-   consistent bit ordering**. libtesla expects bits 0-3=r, 12-15=a.
-   Doom's `struct color` is bit-field `b:8, g:8, r:8, a:8` = BGRA byte
-   order on little-endian.
-4. **`-mb 6` is too tight in 8 MB heap** — `malloc(6MB)` fails when
-   libstdc++/libtesla overhead is in play. `-mb 4` is the working
-   value.
-5. **nx-ovlloader's heap state is NOT cleanly reset on overlay crash**.
-   After any atmosphère fault, every subsequent overlay launch fails
-   fast at `Z_Init`/`I_Error`. **Hard reboot the Switch** between each
-   diagnostic test — there's no shortcut.
+- Hardware-test Task 8 input — confirm D-pad moves player, A fires
+- Add stick handling (left = movement, right = look) once D-pad verified
+- CrashLogger install + diagnose demo-replay crash for v1.1
+- Tasks 9, 10, 11, 12 per Plan v2
+- Add `diagnostics/` to .gitignore (or keep its `.gitkeep` and ignore
+  contents) — currently bloats untracked
