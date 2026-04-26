@@ -1,3 +1,92 @@
+# Session State — 2026-04-26 (end of audio/music session)
+
+Snapshot for resuming after a context clear. **Read this first.**
+
+## TL;DR (2026-04-26)
+
+**SFX + MIDI music both working on hardware.** Doom 1 episode 1 levels
+play with their own correct music tracks. Quit button works cleanly
+most of the time. Major remaining issues:
+
+- **L/R bumper weapon swap regressed.** Bumpers detected, cycle math
+  correct, digit-keys pushed into queue, but engine isn't acting on
+  them. Diagnostic traces in place; need to follow the digit through
+  G_Responder. Branch: `feat/task-9-music`.
+- **Show Controls / Settings buttons crash** under heap pressure
+  (libtesla UI rendering — `nvMapClose` IPC fault). Different surface
+  from audio.
+- **Quit-time fatal occasionally** — Atmosphere fatal `2347-0004` with
+  empty stack (libtesla teardown chain). Intermittent.
+- **Higher-numbered levels (E1M4+) untested.** Only E1M1–E1M3 tried.
+
+## Audio architecture (now)
+
+Vendored from chocolate-doom into `source/opl/`:
+- `opl3.{c,h}` — Nuked-OPL3 cycle-accurate FM emulator
+- `opl.{c,h}`, `opl_internal.h`, `opl_queue.{c,h}` — driver abstraction
+- `i_oplmusic.c` — MIDI player on top of GENMIDI bank
+- `midifile.{c,h}` — MIDI parser, **converted to memio + Z_Malloc arena**
+
+Bridge code (sx-doom-overlay):
+- `source/opl/opl_libnx.{c,h}` — libnx Mutex-backed `opl_driver_t`,
+  exposes `OPL_LIBNX_Render` for synchronous drive from submit thread
+- `source/opl/memio_malloc.c` — replaces doomgeneric's memio with
+  malloc-backed (excluded in Makefile DG_EXCLUDE)
+- `source/opl/opl_compat.h` — PACKED_STRUCT, SDL_Swap*, M_fopen,
+  I_Realloc shims
+- `source/audio_glue.h` + `source/audio_lock.cpp` — extern "C" bridge
+  to `ult::Audio::m_audioMutex` (try-lock with timeout for shutdown)
+
+Audio data flow:
+- SFX: lump → DMX decode (8-bit unsigned → int16 mono at SOURCE rate)
+  → cached → `audio_mixer_play(step_fp = src/out)` → mixer resamples
+  on mix with linear interpolation → output
+- Music: MUS lump → mus2mid (in-memory) → tight-copy → MIDI_LoadBuffer
+  (events array Z_Malloc'd from Doom zone) → i_oplmusic.c PlaySong →
+  callbacks scheduled → submit thread fires callbacks → OPL register
+  writes → OPL3_GenerateStream → mixed additively (75% headroom each)
+  with SFX into stereo output → `audoutAppendAudioOutBuffer`
+
+## Memory map
+
+| Region | Size | Where |
+|---|---|---|
+| Overlay pool ceiling (8 MB slider) | ~8 MB | nx-ovlloader carve-out |
+| libnx + libtesla baseline | ~1.2 MB | services, TLS |
+| **`envGetHeapOverrideSize`** | **~6.8 MB** | reported pool |
+| Doom zone (`-mb 4`) | 4 MB | `Z_Init` malloc, all engine data |
+| ↳ MIDI events arena | 512 KB | Z_Malloc PU_STATIC at music init |
+| ↳ engine state, lump cache, GENMIDI | ~3.5 MB | rest of zone |
+| libtesla framebuffer | ~1.3 MB | RGBA 448×720 |
+| Audio backend (4 buffers + ring + thread stack) | 28 KB | newlib heap |
+| SFX cache | up to 96 KB | newlib heap |
+| Other (libnx services, libstdc++ runtime, etc) | ~250 KB | newlib heap |
+
+## Collab notes for Ethan
+
+- **Reference clones gitignored:** `lib/UltraGB/` and `lib/chocolate-doom/`
+  are not in git (look in `source/opl/` for the vendored OPL stack).
+  Re-clone if you want to study them.
+- **Build:** `git submodule update --init`, then `make`. Requires
+  devkitPro (devkitA64 + libnx + portlibs).
+- **Branches:** `feat/task-9-music` is the audio branch (this session's
+  work). `main` has Tasks 1-8 + sfx commit. Make new feat/* branches
+  off `main` for parallel work; merge to main via PR after testing.
+- **Critical learning:** chocolate-doom's design is desktop-PC oriented.
+  When fighting heap fragmentation, prefer Doom's native `Z_Malloc`
+  zone allocator over newlib heap.
+
+## Z_Malloc opportunities still on the table
+
+Easy wins to reduce newlib heap pressure further:
+1. `mus2mid` output buffer — currently `malloc(64 KB)` per song change
+   in `source/opl/memio_malloc.c::mem_fopen_write`. ~5-line change to
+   `Z_Malloc(PU_STATIC)`.
+2. SFX cache PCM buffers — currently `malloc`'d (with LRU eviction
+   churning newlib). ~10-line change.
+
+---
+
 # Session State — 2026-04-25 (end of long session 1)
 
 Snapshot for resuming after a context clear. **Read this first.**
