@@ -192,6 +192,11 @@ midi_file_t *MIDI_LoadFile(char *filename);
 // song-change hot path so we never round-trip the data through SD card.
 midi_file_t *MIDI_LoadBuffer(void *buf, size_t len);
 
+// sx-doom-overlay: zone-backed arena for per-song event allocation. Init
+// at music subsystem startup; shutdown on music subsystem exit.
+boolean MIDI_InitArena(void);
+void    MIDI_ShutdownArena(void);
+
 // Free a MIDI file.
 
 void MIDI_FreeFile(midi_file_t *file);

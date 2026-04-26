@@ -25,6 +25,7 @@
 #include "i_system.h"
 #include "m_misc.h"
 
+#include "z_zone.h"       // sx-doom-overlay: Doom zone for music arena
 #include "memio.h"        // sx-doom-overlay: in-memory MIDI loading
 #include "opl_compat.h"   // PACKED_STRUCT, SDL_Swap*, M_fopen, I_Realloc
 
@@ -39,39 +40,76 @@
 // to MIDI_LoadBuffer. MIDI_LoadBuffer is the hot path used by I_OPL_RegisterSong.
 
 // -----------------------------------------------------------------------------
-// MIDI events arena
+// MIDI event arena (heap-allocated at music init)
 // -----------------------------------------------------------------------------
 //
-// Per-track event arrays previously used realloc/malloc on the newlib heap.
-// On our small overlay pool (~6.8 MB) the heap fragmented quickly: even on
-// a fresh boot, loading a ~43 KB MIDI (E1M2's "On the Hunt") would fail
-// because no contiguous run of 80+ KB existed for the per-track arrays.
+// Per-track event arrays would otherwise need realloc growth up to 500+ KB
+// of contiguous heap (E1M2's "On the Hunt" has ~12k MIDI events × 32 bytes
+// per midi_event_t = ~400 KB single track). Doubling realloc to that size
+// requires 768 KB peak (old + new buffer simultaneously), which never fits
+// on our 6.8 MB pool after the engine zone (4 MB) and libtesla framebuffer
+// (1.3 MB) are claimed.
 //
-// The arena is a fixed BSS slab — bump-allocated per song, reset at the
-// start of every MIDI_LoadBuffer. No malloc/realloc/free traffic for the
-// event arrays at all, so the heap stays clean for everything else (audio
-// backend, SFX cache, libnx services, etc).
+// Solution: malloc one fixed arena at music init, when heap is fresh and
+// least fragmented. Bump-allocate from it per song; reset on every new
+// MIDI_LoadBuffer. If the init malloc fails, music is disabled for the
+// session — consistent (no intermittent silent songs) rather than the
+// previous heap-state-dependent failures.
 //
-// 384 KB is enough for any Doom 1 / Doom 2 song we've measured (largest is
-// ~50 KB MIDI → ~80 KB peak across 4 tracks). If a song exceeds, ReadTrack
-// returns false → MIDI_LoadBuffer returns NULL → graceful silent fallback.
+// The 512 KB allocation comes out of newlib heap, so it counts against the
+// pool just like any malloc. Net cost vs the previous BSS arena: same. Net
+// vs the dynamic realloc approach: fragmentation eliminated, peak heap
+// pressure during play substantially lower.
 
-#define MIDI_EVENT_ARENA_BYTES  (512 * 1024)
-static uint8_t  midi_event_arena[MIDI_EVENT_ARENA_BYTES];
-static size_t   midi_event_arena_used = 0;
+#define MIDI_ARENA_BYTES  (512 * 1024)
+static uint8_t* g_midi_arena      = NULL;
+static size_t   g_midi_arena_used = 0;
 
 extern void doom_trace(const char* msg);
 
-static void midi_arena_reset(void) { midi_event_arena_used = 0; }
-
-static void* midi_arena_alloc(size_t bytes) {
-    // 8-byte align so midi_event_t pointers are aligned for ARM64.
-    bytes = (bytes + 7u) & ~(size_t)7u;
-    if (midi_event_arena_used + bytes > MIDI_EVENT_ARENA_BYTES) {
-        return NULL;
+// Allocate the arena from the Doom ZONE (PU_STATIC), not newlib heap.
+// The 4 MiB zone has its own allocator that can COMPACT PU_CACHE entries
+// to make room for static allocations — strictly more reliable than
+// newlib malloc, which can't move existing allocations. Called from
+// I_OPL_InitMusic. Returns false only if the zone genuinely can't fit
+// 512 KB (very rare; would need >3.5 MB of pinned static zone state).
+boolean MIDI_InitArena(void)
+{
+    if (g_midi_arena != NULL) return true;  // already allocated
+    g_midi_arena = (uint8_t*)Z_Malloc(MIDI_ARENA_BYTES, PU_STATIC, NULL);
+    if (g_midi_arena == NULL)
+    {
+        doom_trace("MIDI_InitArena: Z_Malloc failed");
+        return false;
     }
-    void* r = midi_event_arena + midi_event_arena_used;
-    midi_event_arena_used += bytes;
+    g_midi_arena_used = 0;
+    char dbg[80];
+    snprintf(dbg, sizeof(dbg),
+             "MIDI_InitArena: %d KB Z_Malloc'd at %p",
+             MIDI_ARENA_BYTES / 1024, (void*)g_midi_arena);
+    doom_trace(dbg);
+    return true;
+}
+
+void MIDI_ShutdownArena(void)
+{
+    if (g_midi_arena != NULL)
+    {
+        Z_Free(g_midi_arena);
+        g_midi_arena = NULL;
+        g_midi_arena_used = 0;
+    }
+}
+
+static void midi_arena_reset(void) { g_midi_arena_used = 0; }
+
+static void* midi_arena_alloc(size_t bytes)
+{
+    if (g_midi_arena == NULL) return NULL;
+    bytes = (bytes + 7u) & ~(size_t)7u;  // 8-byte align
+    if (g_midi_arena_used + bytes > MIDI_ARENA_BYTES) return NULL;
+    void* r = g_midi_arena + g_midi_arena_used;
+    g_midi_arena_used += bytes;
     return r;
 }
 
@@ -504,16 +542,20 @@ static boolean ReadTrack(midi_track_t *track, MEMFILE *stream)
 
     last_event_type = 0;
 
-    capacity = (track->data_len / 3) + 4;  // +4 floor for tiny tracks
+    // Single arena allocation — sized off track byte length. MUS-derived
+    // MIDI events are ~3-4 bytes each (delta + status + 1-2 data bytes
+    // with running status). data_len/3 is a generous upper bound that
+    // still fits the 512 KB arena even for E1M2's heaviest track.
+    capacity = (track->data_len / 3) + 16;
     track->events = (midi_event_t *)midi_arena_alloc(
-                        sizeof(midi_event_t) * capacity);
+        sizeof(midi_event_t) * capacity);
     if (track->events == NULL)
     {
         char dbg[96];
         snprintf(dbg, sizeof(dbg),
-                 "ReadTrack: arena exhausted (data_len=%u, want=%u arena_used=%zu)",
+                 "ReadTrack: arena alloc fail (data_len=%u want=%u used=%zu/%d KB)",
                  track->data_len, capacity,
-                 midi_event_arena_used);
+                 g_midi_arena_used / 1024, MIDI_ARENA_BYTES / 1024);
         doom_trace(dbg);
         return false;
     }
@@ -524,8 +566,7 @@ static boolean ReadTrack(midi_track_t *track, MEMFILE *stream)
         {
             char dbg[80];
             snprintf(dbg, sizeof(dbg),
-                     "ReadTrack: capacity exhausted at %u events",
-                     capacity);
+                     "ReadTrack: capacity exhausted at %u events", capacity);
             doom_trace(dbg);
             return false;
         }
@@ -547,12 +588,8 @@ static boolean ReadTrack(midi_track_t *track, MEMFILE *stream)
     return true;
 }
 
-// Free a track:
-//
-// sx-doom-overlay: track->events lives in midi_event_arena (bump-allocated
-// per song, reset on next MIDI_LoadBuffer) — DO NOT free it. The per-event
-// FreeEvent calls still apply: sysex/meta data buffers are malloc'd by
-// ReadByteSequence and need real free()s.
+// Free a track. Per-event FreeEvent releases sysex/meta data buffers that
+// ReadByteSequence malloc'd; then we free the events array itself.
 
 static void FreeTrack(midi_track_t *track)
 {
@@ -562,7 +599,9 @@ static void FreeTrack(midi_track_t *track)
     {
         FreeEvent(&track->events[i]);
     }
-    // track->events: arena memory, no free.
+    // track->events lives in g_midi_arena (Z_Malloc'd block, bump-allocated
+    // per song). Reset on next MIDI_LoadBuffer; no per-track free here.
+    track->events = NULL;
 }
 
 static boolean ReadAllTracks(midi_file_t *file, MEMFILE *stream)
@@ -657,16 +696,12 @@ midi_file_t *MIDI_LoadBuffer(void *buf, size_t len)
     midi_file_t *file;
     MEMFILE *stream;
 
-    // Reset the events arena. The previous song's tracks (if any) have
-    // already had MIDI_FreeFile called on them by the engine before this
-    // entry — only their malloc'd sysex/meta buffers needed freeing,
-    // event arrays were arena memory we just abandon here.
     midi_arena_reset();
     {
         char dbg[64];
         snprintf(dbg, sizeof(dbg),
-                 "MIDI_LoadBuffer: enter len=%zu arena=%dKB",
-                 len, MIDI_EVENT_ARENA_BYTES / 1024);
+                 "MIDI_LoadBuffer: enter len=%zu",
+                 len);
         doom_trace(dbg);
     }
 

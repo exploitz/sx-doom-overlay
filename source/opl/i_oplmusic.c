@@ -1669,6 +1669,28 @@ static void *I_OPL_RegisterSong(void *data, int len)
     // No SD I/O, no temp file, no fragmentation churn.
     extern void doom_trace(const char* msg);
 
+    // Retry loop — heap state is dynamic; transient allocations often
+    // settle within tens of ms, so a failed first attempt frequently
+    // succeeds on retry. Empirically observed: "had to load lvl 2 twice
+    // to get music." This automates that user behavior.
+    int attempt = 0;
+    const int MAX_ATTEMPTS = 4;
+retry:
+    ++attempt;
+    if (attempt > 1)
+    {
+        // Brief sleep lets pending allocations finish + scheduler give
+        // up CPU so libnx/libtesla can complete in-flight IPC. svc time
+        // is in nanoseconds. 30 ms is enough for a couple of audio buffer
+        // cycles which is when most transient allocs free.
+        extern void svcSleepThread(uint64_t);
+        svcSleepThread((uint64_t)30 * 1000000ULL);
+        char dbg[64];
+        snprintf(dbg, sizeof(dbg),
+                 "RegisterSong: retry attempt=%d (len=%d)", attempt, len);
+        doom_trace(dbg);
+    }
+
     if (IsMid(data, len) && len < MAXMIDLENGTH)
     {
         result = MIDI_LoadBuffer(data, (size_t)len);
@@ -1737,9 +1759,27 @@ static void *I_OPL_RegisterSong(void *data, int len)
         if (outstream) mem_fclose(outstream);
     }
 
+    if (result == NULL && attempt < MAX_ATTEMPTS)
+    {
+        // Heap might consolidate by the next attempt — try again.
+        goto retry;
+    }
+
     if (result == NULL)
     {
-        fprintf(stderr, "I_OPL_RegisterSong: Failed to load MID.\n");
+        char buf[64];
+        snprintf(buf, sizeof(buf),
+                 "RegisterSong: gave up after %d attempts (len=%d)",
+                 attempt, len);
+        doom_trace(buf);
+    }
+    else if (attempt > 1)
+    {
+        char buf[64];
+        snprintf(buf, sizeof(buf),
+                 "RegisterSong: succeeded on attempt %d (len=%d)",
+                 attempt, len);
+        doom_trace(buf);
     }
 
     return result;
@@ -1773,6 +1813,9 @@ static void I_OPL_ShutdownMusic(void)
 
         W_ReleaseLumpName(DEH_String("genmidi"));
 
+        // sx-doom-overlay: release the zone-backed MIDI events arena.
+        MIDI_ShutdownArena();
+
         music_initialized = false;
     }
 }
@@ -1785,6 +1828,17 @@ static boolean I_OPL_InitMusic(void)
     opl_init_result_t chip_type;
 
     OPL_SetSampleRate(snd_samplerate);
+
+    // sx-doom-overlay: claim the Doom-zone-backed MIDI events arena while
+    // the engine zone is fresh. Z_Malloc(PU_STATIC) can compact PU_CACHE
+    // blocks to make 512 KB room — strictly more reliable than newlib
+    // malloc on our small overlay pool.
+    if (!MIDI_InitArena())
+    {
+        // Logged inside MIDI_InitArena. Continue anyway — small songs may
+        // still parse if a future arena alloc retry succeeds. Bigger songs
+        // will fail per-track gracefully (silent fallback).
+    }
 
     chip_type = OPL_Init(opl_io_port);
     if (chip_type == OPL_INIT_NONE)
