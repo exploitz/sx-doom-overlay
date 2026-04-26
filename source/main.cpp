@@ -39,9 +39,20 @@ namespace {
 
 constexpr const char* kAppTitle      = "Doom Overlay";
 constexpr const char* kAppVersion    = "0.0.1-task7";
-constexpr int         kRenderScale   = 2;       // 1×=320×200, 2×=640×400, 3×=960×600
+
+// libtesla's default framebuffer is 448×720 with a hardcoded block-linear
+// swizzle (tesla.hpp:2700: "Pure functions of the fixed 448×720 /
+// offsetWidthVar=112 geometry"). Setting cfg::FramebufferWidth/Height to
+// non-default values does NOT recompute the swizzle constants — pixels
+// past x=447 land at wrong memory addresses and corrupt libtesla state.
+// We therefore stay at the default and draw Doom CENTERED in that region.
+constexpr int         kFbWidth       = 448;
+constexpr int         kFbHeight      = 720;
 constexpr int         kDoomW         = 320;
 constexpr int         kDoomH         = 200;
+constexpr int         kRenderScale   = 1;       // forced to 1× for default FB
+constexpr int         kDoomOffsetX   = (kFbWidth  - kDoomW * kRenderScale) / 2;  // 64
+constexpr int         kDoomOffsetY   = (kFbHeight - kDoomH * kRenderScale) / 2;  // 260
 constexpr const char* kIWadPath      = "sdmc:/switch/.overlays/doom/freedoom1.wad";
 constexpr const char* kZoneSizeMb    = "4";
 
@@ -126,19 +137,21 @@ class DoomElement final : public tsl::elm::Element {
         // 320×200×4 = 256k pixels per frame at 35 Hz = 9 Mpx/s,
         // well within budget. Optimization to NEON + precomputed swizzle
         // LUTs (UltraGB pattern) is a follow-up task.
+        // Background: clear the full framebuffer to black so old text
+        // from the bootstrap doesn't show around the Doom viewport.
+        renderer->fillScreen(tsl::Color(0xF000));
+
         const std::uint8_t* src = reinterpret_cast<const std::uint8_t*>(DG_ScreenBuffer);
         if (src) {
+            // Doom 320×200 at 1× centered in libtesla's default 448×720
+            // framebuffer. Scale > 1 requires libtesla's windowed mode
+            // (or a swizzle replacement) since the block-linear math is
+            // hardcoded for 448-wide; a follow-up task.
             for (int sy = 0; sy < kDoomH; ++sy) {
                 const std::uint8_t* row = src + sy * kDoomW;
+                const int dy = kDoomOffsetY + sy;
                 for (int sx = 0; sx < kDoomW; ++sx) {
-                    const tsl::Color c(g_palette_lut[row[sx]]);
-                    const int dx = sx * kRenderScale;
-                    const int dy = sy * kRenderScale;
-                    for (int oy = 0; oy < kRenderScale; ++oy) {
-                        for (int ox = 0; ox < kRenderScale; ++ox) {
-                            renderer->setPixel(dx + ox, dy + oy, c);
-                        }
-                    }
+                    renderer->setPixel(kDoomOffsetX + sx, dy, tsl::Color(g_palette_lut[row[sx]]));
                 }
             }
         }
@@ -203,11 +216,11 @@ class DoomGui final : public tsl::Gui {
 class DoomOverlay final : public tsl::Overlay {
    public:
     void initServices() override {
-        // Set the libtesla framebuffer dimensions BEFORE the layer is
-        // created. This is the UltraGB-Overlay pattern (main.cpp:2978):
-        // FramebufferWidth/Height = native × scale.
-        tsl::cfg::FramebufferWidth  = kDoomW * kRenderScale;
-        tsl::cfg::FramebufferHeight = kDoomH * kRenderScale;
+        // Stay on libtesla's default 448×720 framebuffer — the block-linear
+        // swizzle (tesla.hpp:2700) is hardcoded for this geometry. Doom is
+        // drawn into a centered 320×200 region inside the default buffer.
+        // Larger scale support is a follow-up task that will need either
+        // libtesla's windowed mode or a custom swizzle replacement.
     }
 
     void exitServices() override {
