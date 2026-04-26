@@ -171,19 +171,24 @@ if [ "$DO_PUSH_OVL" -eq 1 ]; then
         exit 1
     fi
 
-    DEST_DIR="$SD_ROOT/switch/.overlays"
-    mkdir -p "$DEST_DIR"
-    DEST="$DEST_DIR/sx-doom-overlay.ovl"
-
     bold "==> Pushing $OVL_PATH"
-    cp "$OVL_PATH" "$DEST"
-    sync
-    SIZE_LOCAL=$(stat -c%s "$OVL_PATH")
-    SIZE_REMOTE=$(stat -c%s "$DEST")
-    if [ "$SIZE_LOCAL" -ne "$SIZE_REMOTE" ]; then
-        warn "size mismatch — local $SIZE_LOCAL vs SD $SIZE_REMOTE"
+    if [ "$SD_ROOT" = "MTP" ]; then
+        mtp_push "$OVL_PATH" "switch/.overlays/sx-doom-overlay.ovl"
+        SIZE_LOCAL=$(stat -c%s "$OVL_PATH")
+        echo "    → switch/.overlays/sx-doom-overlay.ovl ($SIZE_LOCAL bytes via MTP)"
+    else
+        DEST_DIR="$SD_ROOT/switch/.overlays"
+        mkdir -p "$DEST_DIR"
+        DEST="$DEST_DIR/sx-doom-overlay.ovl"
+        cp "$OVL_PATH" "$DEST"
+        sync
+        SIZE_LOCAL=$(stat -c%s "$OVL_PATH")
+        SIZE_REMOTE=$(stat -c%s "$DEST")
+        if [ "$SIZE_LOCAL" -ne "$SIZE_REMOTE" ]; then
+            warn "size mismatch — local $SIZE_LOCAL vs SD $SIZE_REMOTE"
+        fi
+        echo "    → $DEST ($SIZE_REMOTE bytes)"
     fi
-    echo "    → $DEST ($SIZE_REMOTE bytes)"
 fi
 
 # --- Push WAD (optional) ------------------------------------------------------
@@ -194,14 +199,18 @@ if [ "$DO_PUSH_WAD" -eq 1 ]; then
         exit 1
     fi
 
-    DEST_DIR="$SD_ROOT/switch/.overlays/doom"
-    mkdir -p "$DEST_DIR"
-
     bold "==> Pushing $WAD_PATH (this is large; takes a bit)"
-    cp "$WAD_PATH" "$DEST_DIR/freedoom1.wad"
-    [ -f "$LICENSE_PATH" ] && cp "$LICENSE_PATH" "$DEST_DIR/LICENSE.freedoom"
-    sync
-    echo "    → $DEST_DIR/freedoom1.wad"
+    if [ "$SD_ROOT" = "MTP" ]; then
+        mtp_push "$WAD_PATH" "switch/.overlays/doom/freedoom1.wad"
+        [ -f "$LICENSE_PATH" ] && mtp_push "$LICENSE_PATH" "switch/.overlays/doom/LICENSE.freedoom"
+    else
+        DEST_DIR="$SD_ROOT/switch/.overlays/doom"
+        mkdir -p "$DEST_DIR"
+        cp "$WAD_PATH" "$DEST_DIR/freedoom1.wad"
+        [ -f "$LICENSE_PATH" ] && cp "$LICENSE_PATH" "$DEST_DIR/LICENSE.freedoom"
+        sync
+        echo "    → $DEST_DIR/freedoom1.wad"
+    fi
 fi
 
 bold "==> Done"
