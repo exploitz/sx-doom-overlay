@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstring>
 #include <setjmp.h>
+#include <sys/stat.h>
 
 #include "blit.hpp"
 
@@ -62,30 +63,57 @@ bool        g_doom_failed      = false;
 char        g_doom_error_msg[128] = {0};
 doom_blit::PaletteLut g_palette_lut;
 
+// Trace logger — writes to sdmc:/config/sx-doom-overlay/trace.log so
+// if the engine crashes we can read the file off the SD and see exactly
+// how far it got. Lightweight: opens append, writes one line, closes.
+void doom_trace(const char* msg) {
+    FILE* f = std::fopen("sdmc:/config/sx-doom-overlay/trace.log", "a");
+    if (f) {
+        std::fprintf(f, "[%u] %s\n", static_cast<unsigned>(armTicksToNs(armGetSystemTick()) / 1000000ULL), msg);
+        std::fclose(f);
+    }
+}
+
 void try_init_engine() {
+    // Ensure log directory exists.
+    mkdir("sdmc:/config", 0777);
+    mkdir("sdmc:/config/sx-doom-overlay", 0777);
+    doom_trace("=== try_init_engine ===");
+
     // setjmp checkpoint — if the engine longjmps from any I_Error /
     // I_Quit path (patches/0002), we land here with err != 0.
     int err = setjmp(g_doom_error_jmp);
     if (err != 0) {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "longjmp received code=%d", err);
+        doom_trace(buf);
         g_doom_failed = true;
         std::snprintf(g_doom_error_msg, sizeof(g_doom_error_msg),
                       "Engine error (code %d) — see /atmosphere/crash_reports/", err);
         return;
     }
 
-    // argv for doomgeneric_Create. We use Doom's standard CLI args:
+    // argv for doomgeneric_Create. Defensive flags for hardware test:
     //   -iwad <path>   — IWAD to load
     //   -mb 4          — zone allocator size in MiB (matches our heap budget)
-    static char arg_doom[]   = "doom";
-    static char arg_iwad[]   = "-iwad";
+    //   -nosound       — skip SFX init (we have no DG_sound_module yet, Task 9)
+    //   -nomusic       — skip music init (no DG_music_module either)
+    //   -nodraw        — DO NOT use; doomgeneric needs DG_DrawFrame called
+    static char arg_doom[]    = "doom";
+    static char arg_iwad[]    = "-iwad";
     static char arg_iwadpath[256];
-    static char arg_mb[]     = "-mb";
-    static char arg_mbsize[] = "4";
+    static char arg_mb[]      = "-mb";
+    static char arg_mbsize[]  = "4";
+    static char arg_nosound[] = "-nosound";
+    static char arg_nomusic[] = "-nomusic";
     std::strncpy(arg_iwadpath, kIWadPath, sizeof(arg_iwadpath) - 1);
-    char* engine_argv[] = { arg_doom, arg_iwad, arg_iwadpath, arg_mb, arg_mbsize, nullptr };
-    int   engine_argc   = 5;
+    char* engine_argv[] = { arg_doom, arg_iwad, arg_iwadpath, arg_mb, arg_mbsize,
+                            arg_nosound, arg_nomusic, nullptr };
+    int   engine_argc   = 7;
 
+    doom_trace("calling doomgeneric_Create...");
     doomgeneric_Create(engine_argc, engine_argv);
+    doom_trace("doomgeneric_Create returned OK");
     g_doom_initialized = true;
 
     // Pre-build palette LUT from the engine's current colors[] table.
@@ -199,6 +227,15 @@ class DoomGui final : public tsl::Gui {
 
         int ticks_run = 0;
         while (accum_ns >= kTickPeriodNs && ticks_run < kMaxCatchupTicks) {
+            static unsigned tick_count = 0;
+            // Log every 35 ticks (~1 sec) so we can see how far the engine got
+            // before any crash. After ~5 sec we stop logging to avoid disk spam.
+            if ((tick_count % 35) == 0 && tick_count < 35 * 10) {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "tick %u (sec %u)", tick_count, tick_count / 35);
+                doom_trace(buf);
+            }
+            tick_count++;
             doomgeneric_Tick();
             accum_ns -= kTickPeriodNs;
             ticks_run++;
