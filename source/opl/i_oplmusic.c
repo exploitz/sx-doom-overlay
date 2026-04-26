@@ -1857,7 +1857,13 @@ static boolean I_OPL_InitMusic(void)
         dmxoption = snd_dmxoption != NULL ? snd_dmxoption : "";
     }
 
-    if (chip_type == OPL_INIT_OPL3 && strstr(dmxoption, "-opl3") != NULL)
+    // sx-doom-overlay: force OPL3 mode whenever the (Nuked) emulator
+    // reports as OPL3 — gives us stereo per-channel panning + 18 voices
+    // instead of mono OPL2's 9. Makes Doom's MIDI sound noticeably fuller
+    // and more spatial. Vanilla DOS gated this on a -opl3 dmxoption flag
+    // because real OPL3 hardware was rare; we always emulate OPL3, so
+    // there's no reason to default to the OPL2 codepath.
+    if (chip_type == OPL_INIT_OPL3)
     {
         opl_opl3mode = 1;
         num_opl_voices = OPL_NUM_VOICES * 2;
