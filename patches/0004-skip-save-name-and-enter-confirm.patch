@@ -1,0 +1,40 @@
+diff --git a/doomgeneric/m_controls.c b/doomgeneric/m_controls.c
+index f0ffa01..beb12bc 100644
+--- a/doomgeneric/m_controls.c
++++ b/doomgeneric/m_controls.c
+@@ -154,8 +154,8 @@ int key_menu_left      = KEY_LEFTARROW;
+ int key_menu_right     = KEY_RIGHTARROW;
+ int key_menu_back      = KEY_BACKSPACE;
+ int key_menu_forward   = KEY_ENTER;
+-int key_menu_confirm   = 'y';
+-int key_menu_abort     = 'n';
++int key_menu_confirm   = 13;       /* sx-doom-overlay: was 'y'; ENTER for controller */
++int key_menu_abort     = 27;       /* sx-doom-overlay: was 'n'; ESCAPE for controller */
+ 
+ int key_menu_help      = KEY_F1;
+ int key_menu_save      = KEY_F2;
+diff --git a/doomgeneric/m_menu.c b/doomgeneric/m_menu.c
+index 6df9655..9efee93 100644
+--- a/doomgeneric/m_menu.c
++++ b/doomgeneric/m_menu.c
+@@ -634,14 +634,13 @@ void M_DoSave(int slot)
+ //
+ void M_SaveSelect(int choice)
+ {
+-    // we are going to be intercepting all chars
+-    saveStringEnter = 1;
+-    
++    /* sx-doom-overlay: skip name entry. Switch overlay has no keyboard, so
++     * binding A=ENTER+'y' meant any save dialog produced "Y", "YY", ...
++     * Auto-name with slot number; user just picks slot, save happens.
++     * Original chocolate-doom behavior is name-entry via saveStringEnter=1. */
+     saveSlot = choice;
+-    M_StringCopy(saveOldString,savegamestrings[choice], SAVESTRINGSIZE);
+-    if (!strcmp(savegamestrings[choice], EMPTYSTRING))
+-	savegamestrings[choice][0] = 0;
+-    saveCharIndex = strlen(savegamestrings[choice]);
++    M_snprintf(savegamestrings[choice], SAVESTRINGSIZE, "Save Slot %d", choice + 1);
++    M_DoSave(saveSlot);
+ }
+ 
+ //

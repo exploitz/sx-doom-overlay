@@ -1,0 +1,35 @@
+diff --git a/doomgeneric/d_loop.c b/doomgeneric/d_loop.c
+index 1939dbd..77ab441 100644
+--- a/doomgeneric/d_loop.c
++++ b/doomgeneric/d_loop.c
+@@ -133,6 +133,14 @@ static int GetAdjustedTime(void)
+     return (time_ms * TICRATE) / 1000;
+ }
+ 
++/* sx-doom-overlay: forward declarations for direct calls below.
++ * Bypasses loop_interface-> indirection that has been getting corrupted
++ * (instruction abort 2168-0001 with PC at heap-mapped garbage). The struct's
++ * function pointers in .data are being overwritten by something we haven't
++ * tracked down yet; calling the functions directly removes the symptom. */
++extern void D_ProcessEvents(void);
++extern void M_Ticker(void);
++
+ static boolean BuildNewTic(void)
+ {
+     int	gameticdiv;
+@@ -141,11 +149,13 @@ static boolean BuildNewTic(void)
+     gameticdiv = gametic/ticdup;
+ 
+     I_StartTic ();
+-    loop_interface->ProcessEvents();
++    /* sx-doom-overlay: direct call instead of loop_interface->ProcessEvents() */
++    D_ProcessEvents();
+ 
+     // Always run the menu
+ 
+-    loop_interface->RunMenu();
++    /* sx-doom-overlay: direct call instead of loop_interface->RunMenu() */
++    M_Ticker();
+ 
+     if (drone)
+     {

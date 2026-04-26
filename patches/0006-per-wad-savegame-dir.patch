@@ -1,0 +1,27 @@
+diff --git a/doomgeneric/m_config.c b/doomgeneric/m_config.c
+index 865e168..7c8a9c9 100644
+--- a/doomgeneric/m_config.c
++++ b/doomgeneric/m_config.c
+@@ -2115,10 +2115,18 @@ char *M_GetSaveGameDir(char *iwadname)
+ 
+         free(topdir);
+ #else
+-        savegamedir = M_StringJoin(configdir, DIR_SEPARATOR_S, ".savegame/", NULL);
+-
+-        M_MakeDirectory(savegamedir);
+-
++        /* sx-doom-overlay: include iwadname so each WAD gets its own savegame
++         * subdirectory. Original chocolate-doom non-ORIGCODE path ignored
++         * iwadname, causing slot N to collide across WADs (saving in Doom
++         * would overwrite slot N from Chex etc). Mirrors the ORIGCODE branch
++         * that does include iwadname. */
++        {
++            char *topdir = M_StringJoin(configdir, DIR_SEPARATOR_S, ".savegame", NULL);
++            M_MakeDirectory(topdir);
++            savegamedir = M_StringJoin(topdir, DIR_SEPARATOR_S, iwadname, DIR_SEPARATOR_S, NULL);
++            M_MakeDirectory(savegamedir);
++            free(topdir);
++        }
+         printf ("Using %s for savegames\n", savegamedir);
+ #endif
+     }
