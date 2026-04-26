@@ -24,6 +24,7 @@
 // overflow in Doom's BSP recursion. Trust libnx's default.
 
 #include "blit.hpp"
+#include "input_map.hpp"
 
 extern "C" {
 #include "doomgeneric.h"
@@ -272,8 +273,29 @@ class DoomGui final : public tsl::Gui {
         }
     }
 
+    bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState& /*touchPos*/,
+                     HidAnalogStickState /*leftStick*/, HidAnalogStickState /*rightStick*/) override {
+        // libtesla's Gui::handleInput doesn't receive keysUp directly — derive
+        // from the prev-keysHeld delta (same pattern libtesla uses internally
+        // at tesla.hpp:8482-8483).
+        const u64 keysUp = m_prevKeysHeld & ~keysHeld;
+        m_prevKeysHeld = keysHeld;
+
+        // Only forward inputs to the engine if Doom actually loaded; the
+        // loading and error screens shouldn't accept gameplay input.
+        if (g_doom_initialized && !g_doom_failed) {
+            doom_input::dispatch(keysDown, keysUp);
+        }
+
+        // Return true so libtesla considers the input "handled" and doesn't
+        // route it back to its menu logic (which would close the overlay
+        // unexpectedly on B/+/etc.).
+        return true;
+    }
+
    private:
     DoomElement* m_doomElement = nullptr;
+    u64          m_prevKeysHeld = 0;
 };
 
 class DoomOverlay final : public tsl::Overlay {
