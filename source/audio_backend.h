@@ -29,7 +29,11 @@ extern "C" {
 #endif
 
 // Format constants. Both backends use the same values.
-#define AUDIO_BACKEND_SAMPLE_RATE  22050
+//
+// Switch audout's device sample rate is fixed at 48000 Hz. Submitting at any
+// other rate plays at the wrong speed (audout does NOT do per-buffer
+// resampling). UltraGB and the Switch SDK both target this rate.
+#define AUDIO_BACKEND_SAMPLE_RATE  48000
 #define AUDIO_BACKEND_CHANNELS     2          // stereo
 #define AUDIO_BACKEND_BITS         16         // signed PCM
 
@@ -67,6 +71,18 @@ bool audio_backend_submit(audio_backend_t* be, const int16_t* pcm, size_t frames
 
 // Drain any pending output, close the device, free resources.
 void audio_backend_shutdown(audio_backend_t* be);
+
+// Diagnostic snapshot. Useful from main thread to surface why submit() is
+// silently rejecting (e.g., audoutAppendAudioOutBuffer failure on the drain
+// thread sets `dead`; `last_error` carries the libnx Result that caused it).
+typedef struct audio_backend_debug_s {
+    uint32_t last_error;       // libnx Result; 0 = no error recorded
+    int      last_error_step;  // -1 = N/A; 0..BUFS-1 = which prime slot; BUFS = post-prime loop
+    int      primed_count;     // how many buffers successfully entered audout queue
+    bool     dead;
+} audio_backend_debug_t;
+
+void audio_backend_debug(const audio_backend_t* be, audio_backend_debug_t* out);
 
 #ifdef __cplusplus
 }

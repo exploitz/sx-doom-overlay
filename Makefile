@@ -68,8 +68,12 @@ CFLAGS  += $(INCLUDE) -D__SWITCH__
 #   DOOMGENERIC_RESX/RESY    : 320x200 internal Doom resolution
 #   USE_EXCEPTION_WRAP       : libultrahand's no-throw exception stub mechanism
 #   NORMALUNIX, LINUX        : doomgeneric needs these for Linux-style build paths
+#   SWITCH_SOUND             : enables our DG_sound_module / DG_music_module in
+#                              i_sound.c without dragging FEATURE_SOUND's
+#                              SDL_mixer.h include (see patches/0008)
 CFLAGS  += -DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 \
-           -DUSE_EXCEPTION_WRAP=1 -DNORMALUNIX -DLINUX
+           -DUSE_EXCEPTION_WRAP=1 -DNORMALUNIX -DLINUX \
+           -DSWITCH_SOUND
 
 # Doomgeneric warnings we accept (pre-existing in upstream, not regressions
 # we want to fail the build on)

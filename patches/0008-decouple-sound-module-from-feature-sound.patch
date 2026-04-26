@@ -1,0 +1,35 @@
+diff --git a/doomgeneric/i_sound.c b/doomgeneric/i_sound.c
+index c80a9d1..ece723d 100644
+--- a/doomgeneric/i_sound.c
++++ b/doomgeneric/i_sound.c
+@@ -73,7 +73,7 @@ static int snd_mport = 0;
+ 
+ static sound_module_t *sound_modules[] = 
+ {
+-    #ifdef FEATURE_SOUND
++    #if defined(FEATURE_SOUND) || defined(SWITCH_SOUND)
+     &DG_sound_module,
+     #endif
+     NULL,
+@@ -130,7 +130,7 @@ static void InitSfxModule(boolean use_sfx_prefix)
+ 
+ static void InitMusicModule(void)
+ {
+-#ifdef FEATURE_SOUND
++#if defined(FEATURE_SOUND) || defined(SWITCH_SOUND)
+     music_module = &DG_music_module;
+ #endif /* FEATURE_SOUND */
+ }
+diff --git a/doomgeneric/i_sound.h b/doomgeneric/i_sound.h
+index e31b5e5..ac1fab0 100644
+--- a/doomgeneric/i_sound.h
++++ b/doomgeneric/i_sound.h
+@@ -237,7 +237,7 @@ void I_BindSoundVariables(void);
+ // Sound modules
+ 
+ void I_InitTimidityConfig(void);
+-#ifdef FEATURE_SOUND
++#if defined(FEATURE_SOUND) || defined(SWITCH_SOUND)
+ extern sound_module_t DG_sound_module;
+ extern music_module_t DG_music_module;
+ #endif
