@@ -34,17 +34,20 @@ void audio_mixer_init(audio_mixer_t* m) {
 
 bool audio_mixer_play(audio_mixer_t* m, int slot,
                       const int16_t* pcm, size_t length,
+                      uint32_t step_fp,
                       uint8_t vol_l, uint8_t vol_r) {
     if (!m || slot < 0 || slot >= AUDIO_MIXER_CHANNELS || !pcm || length == 0) {
         return false;
     }
+    if (step_fp == 0) step_fp = 0x10000;  // safety: 1.0 default
     audio_mixer_channel_t* c = &m->chans[slot];
-    c->pcm    = pcm;
-    c->length = length;
-    c->pos    = 0;
-    c->vol_l  = vol_l;
-    c->vol_r  = vol_r;
-    c->active = true;
+    c->pcm     = pcm;
+    c->length  = length;
+    c->pos_fp  = 0;
+    c->step_fp = step_fp;
+    c->vol_l   = vol_l;
+    c->vol_r   = vol_r;
+    c->active  = true;
     return true;
 }
 
@@ -71,6 +74,9 @@ void audio_mixer_mix(audio_mixer_t* m, int16_t* dst, size_t frames) {
     }
     const int32_t master = m->master_vol;
 
+    const uint64_t length_fp_max = ((uint64_t)0xFFFFFFFFFFFFFFFFULL);
+    (void)length_fp_max;
+
     for (size_t f = 0; f < frames; ++f) {
         int32_t acc_l = 0, acc_r = 0;
 
@@ -78,14 +84,29 @@ void audio_mixer_mix(audio_mixer_t* m, int16_t* dst, size_t frames) {
             audio_mixer_channel_t* c = &m->chans[s];
             if (!c->active) continue;
 
-            int32_t sample = c->pcm[c->pos];
+            // 16.16 fixed-point pos. Whole part is the source-frame index.
+            // Linear interpolation between consecutive source samples kills
+            // the aliasing harshness from nearest-neighbor on heavy
+            // 11025→48000 upsampling.
+            const uint64_t whole = c->pos_fp >> 16;
+            const uint32_t frac  = (uint32_t)(c->pos_fp & 0xFFFF);
+
+            if (whole >= c->length) {
+                c->active = false;
+                continue;
+            }
+
+            const int32_t s0 = (int32_t)c->pcm[whole];
+            const int32_t s1 = (whole + 1 < c->length)
+                             ? (int32_t)c->pcm[whole + 1]
+                             : s0;
+            // Linear blend.
+            const int32_t sample = s0 + (((s1 - s0) * (int32_t)frac) >> 16);
+
             acc_l += (sample * (int32_t)c->vol_l) / 255;
             acc_r += (sample * (int32_t)c->vol_r) / 255;
 
-            c->pos += 1;
-            if (c->pos >= c->length) {
-                c->active = false;
-            }
+            c->pos_fp += c->step_fp;
         }
 
         acc_l = (acc_l * master) / 255;

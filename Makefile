@@ -34,8 +34,8 @@ APP_AUTHOR  := chase
 APP_VERSION := 0.0.1-bootstrap
 TARGET      := sx-doom-overlay
 BUILD       := build
-SOURCES     := source
-INCLUDES    := source include
+SOURCES     := source source/opl
+INCLUDES    := source source/opl include
 NO_ICON     := 1
 
 # Pull in the libultrahand build rules. This appends to SOURCES and INCLUDES
@@ -116,7 +116,15 @@ DG_EXCLUDE := \
     doomgeneric_sdl.c doomgeneric_soso.c doomgeneric_sosox.c \
     doomgeneric_win.c doomgeneric_xlib.c \
     i_allegrosound.c i_allegromusic.c i_sdlsound.c i_sdlmusic.c \
-    mus2mid.c gusconf.c icon.c
+    gusconf.c icon.c \
+    memio.c
+# mus2mid.c is INCLUDED — used by source/opl/i_oplmusic.c to convert MUS
+# lumps to MIDI for the OPL2 music player. Was previously excluded when
+# music was disabled.
+# memio.c is EXCLUDED — replaced by source/opl/memio_malloc.c which uses
+# plain malloc instead of Z_Malloc, so MIDI loading doesn't fragment
+# Doom's zone allocator (was crashing libtesla's HID thread on level
+# transitions when the zone got tight).
 DG_CFILES := $(filter-out $(DG_EXCLUDE),$(notdir $(wildcard $(DG_DIR)/*.c)))
 
 # Append doomgeneric to source set BEFORE we expand VPATH and the file lists,

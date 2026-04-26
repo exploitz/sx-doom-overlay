@@ -219,9 +219,9 @@ void try_init_engine(const char* iwad_path, int warp_episode, int warp_map) {
     //   -mb 4          — zone allocator size in MiB. -mb 6 confirmed too tight
     //                    (Z_Init malloc fails, longjmp 6 in 6ms after framebuffer
     //                    fixes). Libtesla overlay heap can't spare 6 contiguous MiB.
-    //   -nomusic       — skip music init (DG_music_module is a no-op stub;
-    //                    nomusic prevents InitMusicModule from referencing it)
     //   SFX enabled via DG_sound_module in i_sound_switch.c (SWITCH_SOUND).
+    //   Music enabled via DG_music_module → music_opl_module (Nuked-OPL3
+    //   FM synth, vendored from chocolate-doom in source/opl/).
     if (!iwad_path || iwad_path[0] == '\0') {
         g_doom_failed = true;
         std::snprintf(g_doom_error_msg, sizeof(g_doom_error_msg), "No IWAD selected");
@@ -239,7 +239,6 @@ void try_init_engine(const char* iwad_path, int warp_episode, int warp_map) {
     static char arg_iwadpath[256];
     static char arg_mb[]      = "-mb";
     static char arg_mbsize[]  = "4";
-    static char arg_nomusic[] = "-nomusic";
     static char arg_warp[]    = "-warp";
     static char arg_warp_e[8]; // "1".."4"
     static char arg_warp_m[8]; // "1".."32"
@@ -260,7 +259,6 @@ void try_init_engine(const char* iwad_path, int warp_episode, int warp_map) {
     engine_argv[idx++] = arg_iwadpath;
     engine_argv[idx++] = arg_mb;
     engine_argv[idx++] = arg_mbsize;
-    engine_argv[idx++] = arg_nomusic;
     if (warp_episode > 0 && warp_map > 0) {
         std::snprintf(arg_warp_e, sizeof(arg_warp_e), "%d", warp_episode);
         std::snprintf(arg_warp_m, sizeof(arg_warp_m), "%d", warp_map);
@@ -901,6 +899,28 @@ class DoomOverlay final : public tsl::Overlay {
             g_sys_status.psm_ready = true;
         }
 
+        // Heap-tier gate. Ethan's targets: stock 4 MB → silent; 6 MB+ → audio.
+        // envGetHeapOverrideSize is the overlay's pool ceiling (Ultrahand's
+        // "Overlay Memory" slider). Below ~5 MB we skip audio init entirely:
+        //   - audio_backend buffers + ring  ≈ 28 KB
+        //   - OPL2 chip + queue + scratch   ≈ 20 KB
+        //   - SFX cache cap                 ≤ 192 KB
+        //   - active MIDI buffer            ≤  96 KB
+        // Plus Doom's 4 MiB zone + libtesla overhead — pool needs ~5.5 MB
+        // working room before audio is safe to enable.
+        const u64 pool_bytes = envGetHeapOverrideSize();
+        const u64 AUDIO_MIN_POOL_BYTES = 5ULL * 1024 * 1024;  // 5 MB
+        if (pool_bytes != 0 && pool_bytes < AUDIO_MIN_POOL_BYTES) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf),
+                          "audio: skipped — pool %llu KB < %llu KB threshold",
+                          (unsigned long long)(pool_bytes / 1024),
+                          (unsigned long long)(AUDIO_MIN_POOL_BYTES / 1024));
+            doom_trace(buf);
+            switch_audio_set_backend(nullptr);
+            return;
+        }
+
         // Audio backend MUST init here (initServices), not later. We
         // experimentally moved this to after doomgeneric_Create; the drain
         // thread immediately crashed in audoutWaitPlayFinish with a NULL
@@ -910,11 +930,12 @@ class DoomOverlay final : public tsl::Overlay {
         // has shifted and our late-bind hits a half-torn-down session.
         const audio_backend_status_t st =
             audio_backend_init(NULL, &g_audio_backend);
-        char buf[80];
+        char buf[96];
         std::snprintf(buf, sizeof(buf),
-                      "audio_backend_init -> %d (be=%p)",
+                      "audio_backend_init -> %d (be=%p) pool=%lluKB",
                       static_cast<int>(st),
-                      static_cast<void*>(g_audio_backend));
+                      static_cast<void*>(g_audio_backend),
+                      (unsigned long long)(pool_bytes / 1024));
         doom_trace(buf);
         switch_audio_set_backend(g_audio_backend);
     }

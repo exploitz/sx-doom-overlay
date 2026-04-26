@@ -40,6 +40,8 @@
 #include "w_wad.h"
 #include "z_zone.h"
 
+#include "opl/opl_libnx.h"  // OPL_LIBNX_DebugSnapshot for heartbeat trace
+
 // Trace logger lives in main.cpp (writes to sdmc:/config/.../trace.log).
 // Declared extern "C" there for cross-language linkage.
 extern void doom_trace(const char* msg);
@@ -51,13 +53,13 @@ extern void doom_trace(const char* msg);
 #define NUM_CHANNELS         AUDIO_MIXER_CHANNELS         // 8
 #define OUTPUT_RATE          AUDIO_BACKEND_SAMPLE_RATE    // 22050
 
-// Total bytes of PCM held across all cached sounds. Sized to comfortably
-// hold the larger Doom SFX at 48 kHz — pistol ≈49 KB, pstop ≈56 KB — plus
-// 2-3 short sfx (item pickup, footsteps, etc.) coexisting. The earlier
-// 32 KB cap was based on a pessimistic "70 KB free heap" reading that
-// turned out to be the newlib arena's fordblks, not the overlay pool's
-// real ceiling (~8 MB on the slider).
-#define SFX_CACHE_CAP_BYTES  (192 * 1024)
+// Total bytes of PCM held across all cached sounds. With resample-on-mix
+// (sounds stored at native ~11025 Hz instead of 48 kHz output rate), each
+// sound is ~4× smaller. 96 KB cap holds 15-20 typical Doom sounds — plenty
+// for the engine's 8 mixer channels. The freed heap (vs. the old 192 KB cap)
+// goes to MIDI loading, which was failing on E1M2 ("On the Hunt") because
+// the cache was crowding it out.
+#define SFX_CACHE_CAP_BYTES  (96 * 1024)
 
 // One tic at TICRATE=35 ≈ 28.6 ms. 48000 * 28.6 ms ≈ 1371 frames; round up
 // to give the ring a touch of slack against scheduler jitter.
@@ -68,9 +70,10 @@ extern void doom_trace(const char* msg);
 // -----------------------------------------------------------------------------
 
 typedef struct cached_sound_s {
-    int16_t*               pcm;          // mono int16 @ OUTPUT_RATE
-    size_t                 length;       // frames in pcm
+    int16_t*               pcm;          // mono int16 @ source_rate
+    size_t                 length;       // frames in pcm (at source rate)
     size_t                 bytes;        // length * sizeof(int16_t)
+    uint32_t               source_rate;  // DMX header rate (e.g., 11025)
     sfxinfo_t*             sfx;          // back-pointer to clear driver_data
     int                    lock_count;   // > 0 while currently being mixed
     struct cached_sound_s* prev;         // doubly-linked, head=MRU, tail=LRU
@@ -149,7 +152,7 @@ static boolean cache_make_room(size_t need) {
 }
 
 // -----------------------------------------------------------------------------
-// DMX decode (Doom DSXXXX format) → mono int16 @ OUTPUT_RATE
+// DMX decode (Doom DSXXXX format) → mono int16 @ SOURCE rate
 // -----------------------------------------------------------------------------
 //
 // DMX layout (from i_sdlsound.c / vanilla Doom):
@@ -160,9 +163,17 @@ static boolean cache_make_room(size_t need) {
 //   ... samples ...
 //   last 16 bytes: trail pad (skipped)
 // Samples are 8-bit unsigned PCM.
+//
+// sx-doom-overlay: previously upsampled to OUTPUT_RATE (48 kHz) at decode
+// time, which inflated each cached sound 4-5×. Now stores at the lump's
+// native rate (typically 11025 Hz) — the audio_mixer resamples on-the-fly
+// during playback via per-channel pitch_step. doropn shrinks from 120 KB
+// to ~28 KB; the entire SFX cache holds 4× more sounds simultaneously,
+// freeing heap for MIDI loading.
 
 static boolean decode_dmx(const uint8_t* data, size_t len,
-                          int16_t** out_pcm, size_t* out_frames) {
+                          int16_t** out_pcm, size_t* out_frames,
+                          uint32_t* out_rate) {
     if (len < 8 || data[0] != 0x03 || data[1] != 0x00) return false;
 
     uint32_t src_rate = (uint32_t)data[2] | ((uint32_t)data[3] << 8);
@@ -176,43 +187,19 @@ static boolean decode_dmx(const uint8_t* data, size_t len,
     if (real_length <= 0) return false;
     const uint8_t* samples = data + 8 + 16;
 
-    uint64_t out_n64 = ((uint64_t)real_length * (uint64_t)OUTPUT_RATE)
-                       / (uint64_t)src_rate;
-    if (out_n64 < 1 || out_n64 > 0x100000ULL) return false;  // 1M-frame sanity cap
-
-    size_t out_n = (size_t)out_n64;
-    int16_t* pcm = (int16_t*)malloc(out_n * sizeof(int16_t));
+    int16_t* pcm = (int16_t*)malloc((size_t)real_length * sizeof(int16_t));
     if (!pcm) return false;
 
-    // Linear-interpolation resample. step = real_length / out_n in 16.16
-    // fixed point. For each output sample, pos>>16 selects the source pair
-    // (s0, s1) and (pos & 0xFFFF) is the fractional weight in [0..65535].
-    // Nearest-neighbor (the prior version) introduced harsh aliasing on the
-    // typical 11025 → 48000 ratio; linear interp removes most of it for
-    // negligible CPU cost. Vanilla Doom's 8-bit DSXXXX content has limited
-    // bandwidth so linear is plenty.
-    const uint64_t step = ((uint64_t)real_length << 16) / (uint64_t)out_n;
-    uint64_t       pos  = 0;
-    const int32_t  last_idx = real_length - 1;
-    for (size_t i = 0; i < out_n; ++i) {
-        int32_t idx0 = (int32_t)(pos >> 16);
-        int32_t idx1 = idx0 + 1;
-        if (idx0 > last_idx) idx0 = last_idx;
-        if (idx1 > last_idx) idx1 = last_idx;
-        // 8-bit unsigned → centered around 0 (range -128..127).
-        const int32_t s0 = (int32_t)samples[idx0] - 128;
-        const int32_t s1 = (int32_t)samples[idx1] - 128;
-        const int32_t frac = (int32_t)(pos & 0xFFFF);  // 0..65535
-        // Linear blend in the centered 8-bit domain, then expand to 16-bit
-        // by left-shift 8. Range: -128..127 → -32768..32512 (fits int16
-        // exactly; *257 would overflow at the negative extreme).
-        const int32_t blended = s0 + (((s1 - s0) * frac) >> 16);  // -128..127
-        pcm[i] = (int16_t)(blended << 8);
-        pos += step;
+    // 8-bit unsigned → 16-bit signed at SOURCE rate. No resampling here —
+    // the mixer handles it via fixed-point pitch step. Range: 0..255 → -32768..32512.
+    for (int32_t i = 0; i < real_length; ++i) {
+        const int32_t s = (int32_t)samples[i] - 128;  // -128..127
+        pcm[i] = (int16_t)(s << 8);
     }
 
-    *out_pcm = pcm;
-    *out_frames = out_n;
+    *out_pcm    = pcm;
+    *out_frames = (size_t)real_length;
+    *out_rate   = src_rate;
     return true;
 }
 
@@ -246,13 +233,14 @@ static cached_sound_t* cache_get_or_load(sfxinfo_t* sfx) {
 
     int16_t* pcm = NULL;
     size_t   frames = 0;
-    boolean  ok = decode_dmx((const uint8_t*)lump, (size_t)len, &pcm, &frames);
+    uint32_t src_rate = 0;
+    boolean  ok = decode_dmx((const uint8_t*)lump, (size_t)len,
+                             &pcm, &frames, &src_rate);
     W_ReleaseLumpNum(lumpnum);
     if (!ok) return NULL;
 
     size_t bytes = frames * sizeof(int16_t);
     if (bytes > SFX_CACHE_CAP_BYTES) {
-        // Sound exceeds the entire cache cap; refuse rather than thrashing.
         char dbg[96];
         snprintf(dbg, sizeof(dbg),
                  "cache_load: %s too big (%zuB > cap %dB) — dropped",
@@ -271,11 +259,12 @@ static cached_sound_t* cache_get_or_load(sfxinfo_t* sfx) {
         free(pcm);
         return NULL;
     }
-    c->pcm    = pcm;
-    c->length = frames;
-    c->bytes  = bytes;
-    c->sfx    = sfx;
-    c->lock_count = 0;
+    c->pcm         = pcm;
+    c->length      = frames;
+    c->bytes       = bytes;
+    c->source_rate = src_rate;
+    c->sfx         = sfx;
+    c->lock_count  = 0;
     cache_push_head(c);
     g_cache_bytes += bytes;
     sfx->driver_data = c;
@@ -356,11 +345,18 @@ static void I_Switch_Update(void) {
         doom_trace(buf);
         s_first_traced = true;
     } else if ((s_update_calls % 350) == 0) {
-        // ~10s @ 35 Hz
-        char buf[80];
+        // ~10s @ 35 Hz heartbeat. Now also reports OPL liveness so we can
+        // see music init / event traffic in the same line as SFX state.
+        int opl_inited = 0;
+        uint32_t opl_writes = 0, opl_cbs = 0, opl_sched = 0;
+        OPL_LIBNX_DebugSnapshot(&opl_inited, &opl_writes, &opl_cbs, &opl_sched);
+        char buf[160];
         snprintf(buf, sizeof(buf),
-                 "I_Switch_Update: tick=%u submit=%d cache=%zuB",
-                 (unsigned)s_update_calls, (int)submit_ok, g_cache_bytes);
+                 "I_Switch_Update: tick=%u submit=%d cache=%zuB "
+                 "opl=%d writes=%u cbs=%u sched=%u",
+                 (unsigned)s_update_calls, (int)submit_ok, g_cache_bytes,
+                 opl_inited, (unsigned)opl_writes,
+                 (unsigned)opl_cbs, (unsigned)opl_sched);
         doom_trace(buf);
     }
 
@@ -391,20 +387,29 @@ static int I_Switch_StartSound(sfxinfo_t* sfx, int channel, int vol, int sep) {
 
     cached_sound_t* c = cache_get_or_load(sfx);
 
-    // Trace first 8 StartSound calls so we can see name + load outcome.
+    // Always trace cache-miss failures (these are the interesting ones —
+    // SFX silently dropping). For successful loads, only trace the first
+    // 16 unique sfx so we see what the engine is actually requesting
+    // without flooding the log.
     static uint32_t s_start_calls = 0;
-    if (s_start_calls < 8) {
+    if (c == NULL) {
+        char buf[96];
+        snprintf(buf, sizeof(buf),
+                 "I_Switch_StartSound: name=%s DROPPED (cache_get_or_load=NULL)",
+                 (sfx && sfx->name[0]) ? sfx->name : "?");
+        doom_trace(buf);
+        return -1;
+    }
+    if (s_start_calls < 16) {
         s_start_calls++;
         char buf[96];
         snprintf(buf, sizeof(buf),
-                 "I_Switch_StartSound[%u]: name=%s ch=%d vol=%d sep=%d cached=%p len=%zu",
+                 "I_Switch_StartSound[%u]: name=%s ch=%d vol=%d sep=%d len=%zu",
                  (unsigned)s_start_calls,
                  (sfx && sfx->name[0]) ? sfx->name : "?",
-                 channel, vol, sep, (void*)c, c ? c->length : 0);
+                 channel, vol, sep, c->length);
         doom_trace(buf);
     }
-
-    if (!c) return -1;
 
     // Release any previous sound on this channel.
     if (g_channel_sfx[channel]) {
@@ -414,7 +419,14 @@ static int I_Switch_StartSound(sfxinfo_t* sfx, int channel, int vol, int sep) {
 
     int left, right;
     compute_lr(vol, sep, &left, &right);
+    // Resample-on-mix step: how far to advance the source-rate read pointer
+    // for each output frame. (src << 16) / out gives 16.16 fixed point.
+    // Example: 11025 src @ 48000 out → 0x3AB0 (~0.230 source frames per
+    // output frame).
+    const uint32_t step_fp = (uint32_t)(((uint64_t)c->source_rate << 16) /
+                                        (uint64_t)OUTPUT_RATE);
     if (!audio_mixer_play(&g_mixer, channel, c->pcm, c->length,
+                          step_fp,
                           (uint8_t)left, (uint8_t)right)) {
         return -1;
     }
@@ -458,34 +470,60 @@ sound_module_t DG_sound_module = {
 };
 
 // -----------------------------------------------------------------------------
-// DG_music_module — stub. Engine is launched with -nomusic, so InitMusicModule
-// is never called and none of these run. The symbol exists only to satisfy
-// i_sound.c's link reference.
+// DG_music_module — alias to chocolate-doom's music_opl_module (vendored from
+// source/opl/i_oplmusic.c). i_sound.c references DG_music_module by name; we
+// satisfy that by defining DG_music_module as a copy of music_opl_module's
+// function pointers. The OPL driver renders on the audio submit thread via
+// OPL_LIBNX_Render (called from audio_backend_libnx.c::submit_thread_main).
 // -----------------------------------------------------------------------------
 
-static boolean I_Switch_MusicInit(void)            { return false; }
-static void    I_Switch_MusicShutdown(void)        {}
-static void    I_Switch_MusicSetVolume(int v)      { (void)v; }
-static void    I_Switch_MusicPause(void)           {}
-static void    I_Switch_MusicResume(void)          {}
-static void*   I_Switch_MusicRegister(void* d, int l) { (void)d; (void)l; return NULL; }
-static void    I_Switch_MusicUnRegister(void* h)   { (void)h; }
-static void    I_Switch_MusicPlay(void* h, boolean l) { (void)h; (void)l; }
-static void    I_Switch_MusicStop(void)            {}
-static boolean I_Switch_MusicIsPlaying(void)       { return false; }
-static void    I_Switch_MusicPoll(void)            {}
+extern music_module_t music_opl_module;  // source/opl/i_oplmusic.c
+
+static boolean DGMusic_Init(void) {
+    // music_opl_module's Init expects OPL to be set up. i_oplmusic calls
+    // OPL_Init internally — see I_OPL_InitMusic.
+    boolean ok = music_opl_module.Init();
+    char buf[64];
+    snprintf(buf, sizeof(buf), "DGMusic_Init: music_opl_module.Init -> %d", (int)ok);
+    doom_trace(buf);
+    return ok;
+}
+static void    DGMusic_Shutdown(void)        { music_opl_module.Shutdown(); }
+static void    DGMusic_SetVolume(int v)      { music_opl_module.SetMusicVolume(v); }
+static void    DGMusic_Pause(void)           { music_opl_module.PauseMusic(); }
+static void    DGMusic_Resume(void)          { music_opl_module.ResumeMusic(); }
+static void*   DGMusic_Register(void* d, int l) {
+    void* h = music_opl_module.RegisterSong(d, l);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "DGMusic_Register: len=%d -> handle=%p", l, h);
+    doom_trace(buf);
+    return h;
+}
+static void    DGMusic_UnRegister(void* h)   { music_opl_module.UnRegisterSong(h); }
+static void    DGMusic_Play(void* h, boolean l) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "DGMusic_Play: handle=%p loop=%d", h, (int)l);
+    doom_trace(buf);
+    music_opl_module.PlaySong(h, l);
+}
+static void    DGMusic_Stop(void)            { music_opl_module.StopSong(); }
+static boolean DGMusic_IsPlaying(void)       { return music_opl_module.MusicIsPlaying(); }
+static void    DGMusic_Poll(void) {
+    if (music_opl_module.Poll) music_opl_module.Poll();
+}
 
 music_module_t DG_music_module = {
-    NULL, 0,
-    I_Switch_MusicInit,
-    I_Switch_MusicShutdown,
-    I_Switch_MusicSetVolume,
-    I_Switch_MusicPause,
-    I_Switch_MusicResume,
-    I_Switch_MusicRegister,
-    I_Switch_MusicUnRegister,
-    I_Switch_MusicPlay,
-    I_Switch_MusicStop,
-    I_Switch_MusicIsPlaying,
-    I_Switch_MusicPoll,
+    NULL, 0,                  // device list ignored — InitMusicModule binds
+                              // unconditionally when nomusic is false.
+    DGMusic_Init,
+    DGMusic_Shutdown,
+    DGMusic_SetVolume,
+    DGMusic_Pause,
+    DGMusic_Resume,
+    DGMusic_Register,
+    DGMusic_UnRegister,
+    DGMusic_Play,
+    DGMusic_Stop,
+    DGMusic_IsPlaying,
+    DGMusic_Poll,
 };

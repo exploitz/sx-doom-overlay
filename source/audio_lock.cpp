@@ -14,6 +14,7 @@
 // Licensed under GPLv2.
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 
 #include "../lib/libultrahand/libultra/include/audio.hpp"
@@ -26,6 +27,25 @@ void audio_lock_acquire(void) {
 
 void audio_lock_release(void) {
     ult::Audio::m_audioMutex.unlock();
+}
+
+// Try to acquire the libtesla audio mutex with a deadline. Returns true on
+// success (caller MUST call audio_lock_release), false on timeout (caller
+// MUST NOT release). Used during shutdown so we never hang when libtesla's
+// backgroundSoundThread is mid-IPC — better to skip audout teardown than
+// freeze the system. On Switch, std::mutex is backed by a libnx Mutex; the
+// std::timed_mutex is heavier (extra fields) so we simulate try_lock_for
+// with a small spin instead.
+bool audio_lock_try_acquire_ms(unsigned timeout_ms) {
+    using clock = std::chrono::steady_clock;
+    const auto deadline = clock::now() + std::chrono::milliseconds(timeout_ms);
+    do {
+        if (ult::Audio::m_audioMutex.try_lock()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    } while (clock::now() < deadline);
+    return false;
 }
 
 bool audio_libtesla_initialized(void) {
