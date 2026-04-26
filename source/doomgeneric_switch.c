@@ -102,24 +102,38 @@ void doomgeneric_switch_reanchor_clock(void) {
 
 #define KEYQUEUE_SIZE 32
 
+// gametic is the engine's master tic counter (incremented in G_Ticker).
+// Used to gate when a queued event becomes visible to DG_GetKey, which is
+// how we make push_digit's DOWN+UP straddle two tics so gamekeydown[]
+// stays set across G_BuildTiccmd's read.
+extern int gametic;
+
 static struct {
-    uint8_t pressed;  // 1 = down, 0 = up
-    uint8_t key;      // doomkeys.h KEY_*
+    uint8_t pressed;       // 1 = down, 0 = up
+    uint8_t key;           // doomkeys.h KEY_*
+    int     eligible_tic;  // earliest gametic this event may surface
 } s_key_queue[KEYQUEUE_SIZE];
 
 static unsigned s_kq_write = 0;
 static unsigned s_kq_read  = 0;
 
-// Called from DoomGui::handleInput in main.cpp.
-void doomgeneric_switch_push_key(int pressed, unsigned char key) {
+static void enqueue_key(int pressed, unsigned char key, int eligible_tic) {
     unsigned next = (s_kq_write + 1) % KEYQUEUE_SIZE;
     if (next == s_kq_read) {
         // Queue full — drop the oldest event so newest input is preserved.
         s_kq_read = (s_kq_read + 1) % KEYQUEUE_SIZE;
     }
-    s_key_queue[s_kq_write].pressed = pressed ? 1 : 0;
-    s_key_queue[s_kq_write].key     = key;
+    s_key_queue[s_kq_write].pressed      = pressed ? 1 : 0;
+    s_key_queue[s_kq_write].key          = key;
+    s_key_queue[s_kq_write].eligible_tic = eligible_tic;
     s_kq_write = next;
+}
+
+// Called from DoomGui::handleInput in main.cpp. Default gating: event is
+// eligible immediately (tic=gametic). For digit keys synthesised by
+// push_digit() below, we explicitly stagger the release.
+void doomgeneric_switch_push_key(int pressed, unsigned char key) {
+    enqueue_key(pressed, key, gametic);
 }
 
 // Weapon cycle — reads engine player state to skip unowned weapons.
@@ -152,9 +166,15 @@ static const unsigned char kWeaponDigit[NUMWEAPONS] = {
     '3',  // wp_supershotgun — alternates with shotgun (Doom 2 only)
 };
 
+// Synthesise a DOWN+UP keypress that straddles two tics. If we pushed both
+// in the same tic, I_GetEvent's drain-the-queue loop applies them within
+// one tic and gamekeydown[k] toggles 1→0 before G_BuildTiccmd reads it,
+// dropping the input. Tag the UP with eligible_tic = gametic+1 so it only
+// surfaces on the NEXT tic — gamekeydown[k] stays 1 across the whole
+// current tic, weapon switch fires.
 static void push_digit(unsigned char d) {
-    doomgeneric_switch_push_key(1, d);
-    doomgeneric_switch_push_key(0, d);
+    enqueue_key(1, d, gametic);
+    enqueue_key(0, d, gametic + 1);
 }
 
 static void cycle_weapon(int direction) {
@@ -189,6 +209,10 @@ void doomgeneric_switch_weapon_next(void) { cycle_weapon(+1); }
 
 int DG_GetKey(int* pressed, unsigned char* key) {
     if (s_kq_read == s_kq_write) return 0;  // queue empty
+    // Eligibility gate: if the head event was tagged for a future tic
+    // (push_digit's UP, eligible at gametic+1), report empty for THIS tic
+    // so I_GetEvent's drain loop stops here. The event surfaces next tic.
+    if (s_key_queue[s_kq_read].eligible_tic > gametic) return 0;
     *pressed = s_key_queue[s_kq_read].pressed;
     *key     = s_key_queue[s_kq_read].key;
     s_kq_read = (s_kq_read + 1) % KEYQUEUE_SIZE;
