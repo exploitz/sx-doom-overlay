@@ -112,13 +112,35 @@ class DoomElement final : public tsl::elm::Element {
         }
 
         // Blit the engine's 320×200 indexed buffer at integer scale into
-        // libtesla's framebuffer. We get a pointer to libtesla's RGBA4444
-        // framebuffer via Renderer::getCurrentFramebuffer().
+        // libtesla's framebuffer.
+        //
+        // CRITICAL: libtesla's framebuffer is block-linear (Tegra GPU
+        // swizzled), NOT flat row-major. See processRectChunk in
+        // tesla.hpp:1390-1393 which uses blockLinearYPart() for row
+        // addressing. Writing dst[y*w + x] directly is wrong and
+        // scribbles memory all over libtesla's state, eventually
+        // crashing Atmosphère. Route through Renderer::setPixel() which
+        // calls getPixelOffset() (the correct swizzle) under the hood.
+        //
+        // Per-pixel call overhead is fine for Tegra X1: at scale=2 we do
+        // 320×200×4 = 256k pixels per frame at 35 Hz = 9 Mpx/s,
+        // well within budget. Optimization to NEON + precomputed swizzle
+        // LUTs (UltraGB pattern) is a follow-up task.
         const std::uint8_t* src = reinterpret_cast<const std::uint8_t*>(DG_ScreenBuffer);
-        std::uint16_t* dst = static_cast<std::uint16_t*>(renderer->getCurrentFramebuffer());
-        if (src && dst) {
-            doom_blit::blit_indexed_to_rgba4444(
-                src, kDoomW, kDoomH, g_palette_lut, dst, kRenderScale);
+        if (src) {
+            for (int sy = 0; sy < kDoomH; ++sy) {
+                const std::uint8_t* row = src + sy * kDoomW;
+                for (int sx = 0; sx < kDoomW; ++sx) {
+                    const tsl::Color c(g_palette_lut[row[sx]]);
+                    const int dx = sx * kRenderScale;
+                    const int dy = sy * kRenderScale;
+                    for (int oy = 0; oy < kRenderScale; ++oy) {
+                        for (int ox = 0; ox < kRenderScale; ++ox) {
+                            renderer->setPixel(dx + ox, dy + oy, c);
+                        }
+                    }
+                }
+            }
         }
     }
 
