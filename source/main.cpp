@@ -19,6 +19,13 @@
 #include <setjmp.h>
 #include <sys/stat.h>
 
+// Override the default main-thread stack size (libnx default is 1 MiB).
+// Doom's BSP renderer + R_DrawColumn recursion can go deep; bumping to
+// 256 KiB just for the main thread is cheap and rules out stack overflow
+// as the cause of the ST_Drawer-area crash. Symbol read by libnx.
+extern "C" u32 __nx_applet_type;
+extern "C" const u32 __nx_main_thread_stack_size = 256 * 1024;  // 256 KiB
+
 #include "blit.hpp"
 
 extern "C" {
@@ -103,7 +110,7 @@ void try_init_engine() {
     static char arg_iwad[]    = "-iwad";
     static char arg_iwadpath[256];
     static char arg_mb[]      = "-mb";
-    static char arg_mbsize[]  = "4";
+    static char arg_mbsize[]  = "6";  // bumped from 4 — gives sprite/lump cache more room
     static char arg_nosound[] = "-nosound";
     static char arg_nomusic[] = "-nomusic";
     std::strncpy(arg_iwadpath, kIWadPath, sizeof(arg_iwadpath) - 1);
