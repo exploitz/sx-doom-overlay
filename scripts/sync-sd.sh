@@ -59,20 +59,54 @@ for d in /mnt/[a-z]; do
 done
 
 if [ -z "$SD_ROOT" ]; then
-    err "No SD card detected. Mounted /mnt/* drives:"
-    ls -la /mnt/ 2>&1 | grep -E "^d" | head -10 >&2
-    err ""
-    err "Steps to mount via Hekate UMS:"
-    err "  1. Boot Switch into Hekate (hold Volume+ during power)"
-    err "  2. Tools → USB Tools → SD Card"
-    err "  3. Connect USB-C cable to PC"
-    err "  4. Windows mounts it as a drive letter; rerun this script"
-    exit 1
+    # Fall back to MTP mode (Switch via DBI/MTP shows up in Windows Explorer
+    # as "This PC\Nintendo Switch\SD Card\..." but isn't a drive letter, so
+    # WSL can't see it directly. We use a PowerShell helper that talks to
+    # the device via the Shell.Application COM API.
+    if command -v powershell.exe >/dev/null 2>&1; then
+        bold "==> No /mnt drive — trying MTP via PowerShell"
+        SD_ROOT="MTP"
+    else
+        err "No SD card detected on /mnt/* and powershell.exe not in PATH."
+        err ""
+        err "Two options:"
+        err "  A) Hekate UMS — boot into Hekate → Tools → USB Tools → SD Card"
+        err "     Windows mounts SD as drive letter; rerun script."
+        err "  B) DBI MTP / Goldleaf — already shows in Explorer as"
+        err "     'This PC\\Nintendo Switch\\SD Card', but this WSL has no"
+        err "     powershell.exe so we can't reach it from here."
+        exit 1
+    fi
 fi
 
-echo "    Found: $SD_ROOT"
-[ -d "$SD_ROOT/switch/.overlays" ] && echo "    /switch/.overlays/ : present"
-[ -d "$SD_ROOT/atmosphere/contents" ] && echo "    /atmosphere/contents/ : present"
+if [ "$SD_ROOT" = "MTP" ]; then
+    echo "    Mode: MTP (via PowerShell + Shell COM API)"
+else
+    echo "    Found: $SD_ROOT"
+    [ -d "$SD_ROOT/switch/.overlays" ] && echo "    /switch/.overlays/ : present"
+    [ -d "$SD_ROOT/atmosphere/contents" ] && echo "    /atmosphere/contents/ : present"
+fi
+
+# --- MTP helpers (only used when SD_ROOT=MTP) --------------------------------
+
+PS_SCRIPT_WIN=""
+if [ "$SD_ROOT" = "MTP" ]; then
+    PS_SCRIPT_WIN="$(wslpath -w "$SCRIPT_DIR/mtp-sync.ps1")"
+fi
+
+mtp_push() {
+    local local_path="$1" remote_path="$2"
+    local local_win="$(wslpath -w "$local_path")"
+    powershell.exe -ExecutionPolicy Bypass -File "$PS_SCRIPT_WIN" \
+        -Action push -LocalPath "$local_win" -RemotePath "$remote_path"
+}
+
+mtp_pull() {
+    local remote_path="$1" local_path="$2"
+    local local_win="$(wslpath -w "$local_path")"
+    powershell.exe -ExecutionPolicy Bypass -File "$PS_SCRIPT_WIN" \
+        -Action pull -RemotePath "$remote_path" -LocalPath "$local_win"
+}
 
 # --- Pull diagnostics first ---------------------------------------------------
 # (do this before push so we don't blow away the trace from the run we're
