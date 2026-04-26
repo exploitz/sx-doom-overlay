@@ -64,10 +64,11 @@ int test_pack_rgba4444_via_lut() {
     const char* T = "pack_rgba4444";
 
     // RGB888 input: 4 entries, hand-picked to verify nibble truncation.
+    // libtesla RGBA4444 layout: r=bits 0-3, g=4-7, b=8-11, a=12-15.
     //   idx 0: pure white (0xFF, 0xFF, 0xFF) -> RGBA4444 = 0xFFFF
-    //   idx 1: pure black (0x00, 0x00, 0x00) -> RGBA4444 = 0x000F (alpha=F)
-    //   idx 2: pure red   (0xFF, 0x00, 0x00) -> RGBA4444 = 0xF00F
-    //   idx 3: half green (0x80, 0x80, 0x80) -> RGBA4444 = 0x888F (0x80&0xF0=0x80)
+    //   idx 1: pure black (0x00, 0x00, 0x00) -> RGBA4444 = 0xF000 (alpha-only in high nibble)
+    //   idx 2: pure red   (0xFF, 0x00, 0x00) -> RGBA4444 = 0xF00F (alpha high + red low)
+    //   idx 3: half gray  (0x80, 0x80, 0x80) -> RGBA4444 = 0xF888
     std::uint8_t rgb[256 * 3] = {0};
     rgb[0]=0xFF; rgb[1]=0xFF; rgb[2]=0xFF;  // white
     rgb[3]=0x00; rgb[4]=0x00; rgb[5]=0x00;  // black
@@ -78,9 +79,9 @@ int test_pack_rgba4444_via_lut() {
     doom_blit::build_palette_lut(rgb, lut);
 
     ASSERT_EQ_HEX(T, lut[0], 0xFFFF);
-    ASSERT_EQ_HEX(T, lut[1], 0x000F);
+    ASSERT_EQ_HEX(T, lut[1], 0xF000);
     ASSERT_EQ_HEX(T, lut[2], 0xF00F);
-    ASSERT_EQ_HEX(T, lut[3], 0x888F);
+    ASSERT_EQ_HEX(T, lut[3], 0xF888);
 
     pass(T);
     return 0;
@@ -89,21 +90,22 @@ int test_pack_rgba4444_via_lut() {
 int test_argb_struct_conversion() {
     const char* T = "argb_struct_conversion";
 
-    // 1024 bytes (256 × {a, r, g, b}). Layout matches doomgeneric's
-    // `struct color colors[256]` — see i_video.c:80-84.
+    // 1024 bytes (256 × {b, g, r, a}). Layout matches doomgeneric's
+    // `struct color colors[256]` — bit-fields b:8, g:8, r:8, a:8 in
+    // i_video.h:141-145, which on little-endian = BGRA byte order.
     std::uint8_t argb[256 * 4] = {0};
-    // idx 0: a=0, r=0xFF, g=0xFF, b=0xFF (white, alpha ignored)
-    argb[0]=0x00; argb[1]=0xFF; argb[2]=0xFF; argb[3]=0xFF;
-    // idx 1: a=0, r=0x10, g=0x80, b=0xC0 (verifies channel ordering)
-    argb[4]=0x00; argb[5]=0x10; argb[6]=0x80; argb[7]=0xC0;
+    // idx 0: b=0xFF, g=0xFF, r=0xFF, a=0 (white, alpha ignored)
+    argb[0]=0xFF; argb[1]=0xFF; argb[2]=0xFF; argb[3]=0x00;
+    // idx 1: b=0xC0, g=0x80, r=0x10, a=0 (verifies channel ordering)
+    argb[4]=0xC0; argb[5]=0x80; argb[6]=0x10; argb[7]=0x00;
 
     PaletteLut lut;
     doom_blit::build_palette_lut_from_argb_struct(argb, lut);
 
     ASSERT_EQ_HEX(T, lut[0], 0xFFFF);
-    // 0x10&0xF0=0x10 -> r-nibble=1; 0x80&0xF0=0x80 -> g-nibble=8;
-    // 0xC0&0xF0=0xC0 -> b-nibble=C; alpha=F. Packed: 0x18CF.
-    ASSERT_EQ_HEX(T, lut[1], 0x18CF);
+    // r=0x10>>4=1 (bits 0-3); g=0x80>>4=8 (bits 4-7);
+    // b=0xC0>>4=C (bits 8-11); alpha=F (bits 12-15). Packed: 0xFC81.
+    ASSERT_EQ_HEX(T, lut[1], 0xFC81);
 
     pass(T);
     return 0;
@@ -127,7 +129,7 @@ int test_blit_scale_1() {
 
     ASSERT_EQ_HEX(T, dst[0], 0xFFFF);
     ASSERT_EQ_HEX(T, dst[1], 0xF00F);
-    ASSERT_EQ_HEX(T, dst[2], 0x0F0F);
+    ASSERT_EQ_HEX(T, dst[2], 0xF0F0);
     ASSERT_EQ_HEX(T, dst[3], 0xFFFF);
 
     pass(T);
@@ -159,9 +161,9 @@ int test_blit_scale_2() {
         std::uint16_t dst[8] = {0};
         doom_blit::blit_indexed_to_rgba4444(src, 2, 1, lut, dst, 2);
         ASSERT_EQ_HEX(T, dst[0], 0xF00F); ASSERT_EQ_HEX(T, dst[1], 0xF00F);
-        ASSERT_EQ_HEX(T, dst[2], 0x0F0F); ASSERT_EQ_HEX(T, dst[3], 0x0F0F);
+        ASSERT_EQ_HEX(T, dst[2], 0xF0F0); ASSERT_EQ_HEX(T, dst[3], 0xF0F0);
         ASSERT_EQ_HEX(T, dst[4], 0xF00F); ASSERT_EQ_HEX(T, dst[5], 0xF00F);
-        ASSERT_EQ_HEX(T, dst[6], 0x0F0F); ASSERT_EQ_HEX(T, dst[7], 0x0F0F);
+        ASSERT_EQ_HEX(T, dst[6], 0xF0F0); ASSERT_EQ_HEX(T, dst[7], 0xF0F0);
     }
 
     pass(T);

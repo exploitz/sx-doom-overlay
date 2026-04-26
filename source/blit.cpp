@@ -25,15 +25,27 @@ namespace doom_blit {
 
 namespace {
 
-// Pack 4-bit channels into RGBA4444. Truncates 8-bit channels via the high
-// nibble. Alpha is always opaque (0xF).
+// Pack 4-bit channels into libtesla's RGBA4444 format.
+//
+// libtesla's `tsl::Color` (tesla.hpp:341-352) is a bit-field
+//   struct { u16 r:4, g:4, b:4, a:4; }
+// On little-endian ARM, the FIRST bit-field (r) gets the LOWEST bits, so
+// the u16 raw layout is:
+//   bits  0..3  : r
+//   bits  4..7  : g
+//   bits  8..11 : b
+//   bits 12..15 : a
+//
+// We take 8-bit channel inputs (0..255), shift down to 4-bit (>>4), and
+// pack into the right slots. Alpha is always opaque (0xF) for Doom output.
 inline std::uint16_t pack_rgba4444(std::uint8_t r,
                                    std::uint8_t g,
                                    std::uint8_t b) {
-    return static_cast<std::uint16_t>(((r & 0xF0) << 8) |
-                                      ((g & 0xF0) << 4) |
-                                       (b & 0xF0)        |
-                                       0x000F);
+    return static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(r >> 4)        ) |
+        (static_cast<std::uint16_t>(g >> 4) <<  4 ) |
+        (static_cast<std::uint16_t>(b >> 4) <<  8 ) |
+        (static_cast<std::uint16_t>(0xF)    << 12 ));
 }
 
 }  // namespace
@@ -48,12 +60,21 @@ void build_palette_lut(const std::uint8_t* in_rgb888, PaletteLut& out_lut) {
 
 void build_palette_lut_from_argb_struct(const std::uint8_t* in_colors_argb,
                                         PaletteLut& out_lut) {
-    // doomgeneric's `struct color { a, r, g, b }` — see i_video.c:80-84.
-    // We skip the alpha byte and pick R, G, B.
+    // doomgeneric's `struct color` is declared `b:8, g:8, r:8, a:8`
+    // (i_video.h:141-145). On little-endian ARM, bit-field declaration
+    // order maps to byte order LOW-TO-HIGH, so the actual byte layout is:
+    //   byte[0] = B
+    //   byte[1] = G
+    //   byte[2] = R
+    //   byte[3] = A   (gamma-applied; we ignore it)
+    //
+    // (Function name says "argb_struct" for legacy reasons — the actual
+    // memory layout is BGRA.)
     for (int i = 0; i < 256; ++i) {
-        out_lut[i] = pack_rgba4444(in_colors_argb[i * 4 + 1],
-                                   in_colors_argb[i * 4 + 2],
-                                   in_colors_argb[i * 4 + 3]);
+        std::uint8_t b = in_colors_argb[i * 4 + 0];
+        std::uint8_t g = in_colors_argb[i * 4 + 1];
+        std::uint8_t r = in_colors_argb[i * 4 + 2];
+        out_lut[i] = pack_rgba4444(r, g, b);
     }
 }
 
