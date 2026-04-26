@@ -157,8 +157,13 @@ static void submit_thread_main(void* arg) {
         // distortion than the prior plain `add + hard clamp`).
         OPL_LIBNX_Render(music_scratch, FRAMES_PER_BUF);
         const int total_samples = FRAMES_PER_BUF * AUDIO_BACKEND_CHANNELS;
-        const int32_t SFX_SCALE   = 192;   // 75% — leaves 6 dB headroom
-        const int32_t MUSIC_SCALE = 192;   // 75% — same
+        // sx-doom-overlay: With compute_lr's 2x boost, a max-volume SFX
+        // already hits ~95% of int16 unscaled. Bus-mix scales reduced to
+        // ~62% per source so the sum stays under int16 even with multiple
+        // simultaneous loud SFX + OPL music — eliminates the hard clip
+        // "distortion at high volume" bug.
+        const int32_t SFX_SCALE   = 160;   // 62% — extra headroom for
+        const int32_t MUSIC_SCALE = 160;   // peak coexistence without clip
         for (int i = 0; i < total_samples; ++i) {
             int32_t s = ((int32_t)out[i] * SFX_SCALE
                        + (int32_t)music_scratch[i] * MUSIC_SCALE) >> 8;

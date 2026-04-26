@@ -315,10 +315,14 @@ static int I_Switch_GetSfxLumpNum(sfxinfo_t* sfx) {
 }
 
 // Convert Doom's (vol 0..127, sep 0..254) into mixer's (vol_l, vol_r) 0..255.
-// Same formula as i_sdlsound.
+// sx-doom-overlay: 2× boost vs chocolate-doom's i_sdlsound formula. Original
+// `(254-sep)*vol/127` peaks at 254 only when both sep=0 AND vol=127 (rare —
+// Doom's snd_SfxVolume default of 8/15 yields vol≈64, centered sep gives
+// l≈63 = 25% of mixer scale). With 2× scale, default volume yields ~50%
+// mixer; user's volume slider at max hits the 255 ceiling cleanly.
 static void compute_lr(int vol, int sep, int* left, int* right) {
-    int l = ((254 - sep) * vol) / 127;
-    int r = (sep * vol) / 127;
+    int l = ((254 - sep) * vol * 2) / 127;
+    int r = (sep * vol * 2) / 127;
     if (l < 0) l = 0; else if (l > 255) l = 255;
     if (r < 0) r = 0; else if (r > 255) r = 255;
     *left = l;
