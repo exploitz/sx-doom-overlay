@@ -119,32 +119,40 @@ if [ "$DO_PULL_DIAG" -eq 1 ]; then
 
     bold "==> Pulling diagnostics → $OUT_DIR"
 
-    # trace.log — our overlay's own log
-    if [ -f "$SD_ROOT/config/sx-doom-overlay/trace.log" ]; then
-        cp "$SD_ROOT/config/sx-doom-overlay/trace.log" "$OUT_DIR/trace.log"
-        echo "    trace.log: $(wc -l < "$OUT_DIR/trace.log") lines"
-    else
-        echo "    trace.log: not present (no run yet)"
-    fi
-
-    # error.log if our shim ever wrote one
-    if [ -f "$SD_ROOT/config/sx-doom-overlay/error.log" ]; then
-        cp "$SD_ROOT/config/sx-doom-overlay/error.log" "$OUT_DIR/error.log"
-    fi
-
-    # Atmosphere crash reports — copy ALL of them into a subfolder
-    if [ -d "$SD_ROOT/atmosphere/crash_reports" ]; then
-        mkdir -p "$OUT_DIR/crash_reports"
-        # Only copy reports newer than 1 day to avoid huge histories
-        find "$SD_ROOT/atmosphere/crash_reports" -maxdepth 1 \
-            \( -name '*.log' -o -name '*.bin' \) -mtime -1 \
-            -exec cp {} "$OUT_DIR/crash_reports/" \; 2>/dev/null || true
-        COUNT=$(ls "$OUT_DIR/crash_reports/" 2>/dev/null | wc -l)
-        if [ "$COUNT" -gt 0 ]; then
-            echo "    crash_reports: $COUNT file(s) (last 24h)"
+    if [ "$SD_ROOT" = "MTP" ]; then
+        # MTP path — pull individually
+        if mtp_pull "config/sx-doom-overlay/trace.log" "$OUT_DIR/trace.log" 2>/dev/null; then
+            echo "    trace.log: $(wc -l < "$OUT_DIR/trace.log" 2>/dev/null || echo 0) lines"
         else
-            echo "    crash_reports: none new (last 24h)"
-            rmdir "$OUT_DIR/crash_reports" 2>/dev/null || true
+            echo "    trace.log: not present on SD"
+        fi
+        mtp_pull "config/sx-doom-overlay/error.log" "$OUT_DIR/error.log" 2>/dev/null || true
+        echo "    (skipping crash_reports pull on MTP — listing/discovery is slow)"
+    else
+        # trace.log — our overlay's own log
+        if [ -f "$SD_ROOT/config/sx-doom-overlay/trace.log" ]; then
+            cp "$SD_ROOT/config/sx-doom-overlay/trace.log" "$OUT_DIR/trace.log"
+            echo "    trace.log: $(wc -l < "$OUT_DIR/trace.log") lines"
+        else
+            echo "    trace.log: not present (no run yet)"
+        fi
+
+        if [ -f "$SD_ROOT/config/sx-doom-overlay/error.log" ]; then
+            cp "$SD_ROOT/config/sx-doom-overlay/error.log" "$OUT_DIR/error.log"
+        fi
+
+        if [ -d "$SD_ROOT/atmosphere/crash_reports" ]; then
+            mkdir -p "$OUT_DIR/crash_reports"
+            find "$SD_ROOT/atmosphere/crash_reports" -maxdepth 1 \
+                \( -name '*.log' -o -name '*.bin' \) -mtime -1 \
+                -exec cp {} "$OUT_DIR/crash_reports/" \; 2>/dev/null || true
+            COUNT=$(ls "$OUT_DIR/crash_reports/" 2>/dev/null | wc -l)
+            if [ "$COUNT" -gt 0 ]; then
+                echo "    crash_reports: $COUNT file(s) (last 24h)"
+            else
+                echo "    crash_reports: none new (last 24h)"
+                rmdir "$OUT_DIR/crash_reports" 2>/dev/null || true
+            fi
         fi
     fi
 

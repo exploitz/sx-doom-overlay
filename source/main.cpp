@@ -103,6 +103,12 @@ void try_init_engine() {
     //   -nosound       — skip SFX init (we have no DG_sound_module yet, Task 9)
     //   -nomusic       — skip music init (no DG_music_module either)
     //   -nodraw        — DO NOT use; doomgeneric needs DG_DrawFrame called
+    // -warp <ep> <map> + -skill <n> bypasses title screen and demo entirely;
+    // engine jumps straight to E1M1 in 'I'm Too Young To Die' via D_DoomMain's
+    // autostart=true path. If the previous tick-169 crash was specific to
+    // the demo-init code chain (G_DeferedPlayDemo → G_DoPlayDemo), -warp
+    // sidesteps it. If the crash is in P_SetupLevel itself, -warp will hit
+    // it just as fast (and we'll know).
     static char arg_doom[]    = "doom";
     static char arg_iwad[]    = "-iwad";
     static char arg_iwadpath[256];
@@ -110,10 +116,18 @@ void try_init_engine() {
     static char arg_mbsize[]  = "4";  // original working value; -mb 6 was too tight in 8 MB heap
     static char arg_nosound[] = "-nosound";
     static char arg_nomusic[] = "-nomusic";
+    static char arg_warp[]    = "-warp";
+    static char arg_warp_ep[] = "1";
+    static char arg_warp_mp[] = "1";
+    static char arg_skill[]   = "-skill";
+    static char arg_skill_n[] = "2";
     std::strncpy(arg_iwadpath, kIWadPath, sizeof(arg_iwadpath) - 1);
     char* engine_argv[] = { arg_doom, arg_iwad, arg_iwadpath, arg_mb, arg_mbsize,
-                            arg_nosound, arg_nomusic, nullptr };
-    int   engine_argc   = 7;
+                            arg_nosound, arg_nomusic,
+                            arg_warp, arg_warp_ep, arg_warp_mp,
+                            arg_skill, arg_skill_n,
+                            nullptr };
+    int   engine_argc   = 12;
 
     doom_trace("calling doomgeneric_Create...");
     doomgeneric_Create(engine_argc, engine_argv);
