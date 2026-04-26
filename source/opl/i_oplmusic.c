@@ -1857,13 +1857,13 @@ static boolean I_OPL_InitMusic(void)
         dmxoption = snd_dmxoption != NULL ? snd_dmxoption : "";
     }
 
-    // sx-doom-overlay: OPL3 mode (stereo + 18 voices) gives noticeably
-    // fuller music than OPL2 (mono, 9 voices), but the doubled per-frame
-    // render workload appears to make the system-freeze-on-quit race
-    // (libtesla audout teardown + our submit thread) more likely to
-    // trip. Reverted to opt-in via DMXOPTION='-opl3' env var until the
-    // teardown race is fixed independently.
-    if (chip_type == OPL_INIT_OPL3 && strstr(dmxoption, "-opl3") != NULL)
+    // sx-doom-overlay: force OPL3 mode whenever the (Nuked) emulator
+    // reports as OPL3 — gives stereo per-channel panning + 18 voices.
+    // (Briefly correlated with sleep/wake-on-quit bug but confirmed
+    // unrelated; that bug is intermittent and orthogonal to OPL3
+    // workload.) Vanilla DOS gated this on DMXOPTION='-opl3' because
+    // real OPL3 hardware was rare; we always emulate OPL3.
+    if (chip_type == OPL_INIT_OPL3)
     {
         opl_opl3mode = 1;
         num_opl_voices = OPL_NUM_VOICES * 2;
