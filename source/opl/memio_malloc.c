@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "memio.h"
+#include "z_zone.h"   // sx-doom-overlay: route allocations to Doom zone
 
 typedef enum { MODE_READ, MODE_WRITE } memfile_mode_t;
 
@@ -30,7 +31,7 @@ struct _MEMFILE {
 };
 
 MEMFILE* mem_fopen_read(void* buf, size_t buflen) {
-    MEMFILE* file = (MEMFILE*)malloc(sizeof(MEMFILE));
+    MEMFILE* file = (MEMFILE*)Z_Malloc(sizeof(MEMFILE), PU_STATIC, NULL);
     if (!file) return NULL;
     file->buf      = (unsigned char*)buf;
     file->buflen   = buflen;
@@ -53,16 +54,15 @@ size_t mem_fread(void* buf, size_t size, size_t nmemb, MEMFILE* stream) {
 }
 
 MEMFILE* mem_fopen_write(void) {
-    MEMFILE* file = (MEMFILE*)malloc(sizeof(MEMFILE));
+    MEMFILE* file = (MEMFILE*)Z_Malloc(sizeof(MEMFILE), PU_STATIC, NULL);
     if (!file) return NULL;
-    // sx-doom-overlay: chocolate-doom's original 1024-byte initial caused
-    // 5-6 realloc-doublings to fit a typical Doom MIDI output (30-50 KB),
-    // each leaving a fragmentation hole. Start at 64 KB — covers ~95% of
-    // Doom songs without a single realloc, dramatically lowering peak
-    // heap pressure during song-change.
+    // 64 KB initial covers ~95% of Doom songs without a single grow.
+    // sx-doom-overlay: backed by Doom zone (Z_Malloc) instead of newlib
+    // heap, so mus2mid output buffer churn during song change doesn't
+    // fragment newlib (which still serves audio_backend, libtesla, etc).
     file->alloced  = 64 * 1024;
-    file->buf      = (unsigned char*)malloc(file->alloced);
-    if (!file->buf) { free(file); return NULL; }
+    file->buf      = (unsigned char*)Z_Malloc(file->alloced, PU_STATIC, NULL);
+    if (!file->buf) { Z_Free(file); return NULL; }
     file->buflen   = 0;
     file->position = 0;
     file->mode     = MODE_WRITE;
@@ -73,9 +73,12 @@ size_t mem_fwrite(const void* ptr, size_t size, size_t nmemb, MEMFILE* stream) {
     if (stream->mode != MODE_WRITE) return (size_t)-1;
     size_t bytes = size * nmemb;
     while (bytes > stream->alloced - stream->position) {
+        // Z_Malloc has no realloc primitive — manual grow-and-copy.
         size_t newsz = stream->alloced * 2;
-        unsigned char* newbuf = (unsigned char*)realloc(stream->buf, newsz);
+        unsigned char* newbuf = (unsigned char*)Z_Malloc(newsz, PU_STATIC, NULL);
         if (!newbuf) return 0;
+        memcpy(newbuf, stream->buf, stream->buflen);
+        Z_Free(stream->buf);
         stream->buf     = newbuf;
         stream->alloced = newsz;
     }
@@ -92,8 +95,8 @@ void mem_get_buf(MEMFILE* stream, void** buf, size_t* buflen) {
 
 void mem_fclose(MEMFILE* stream) {
     if (!stream) return;
-    if (stream->mode == MODE_WRITE) free(stream->buf);
-    free(stream);
+    if (stream->mode == MODE_WRITE) Z_Free(stream->buf);
+    Z_Free(stream);
 }
 
 long mem_ftell(MEMFILE* stream) {

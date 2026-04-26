@@ -1731,18 +1731,20 @@ retry:
                 size_t  outbuf_len;
                 mem_get_buf(outstream, &outbuf, &outbuf_len);
                 // Tight copy + free the streams BEFORE parsing.
-                void* tight = malloc(outbuf_len);
+                // Z_Malloc instead of malloc — keep the entire music load
+                // path inside the Doom zone, no newlib heap touched.
+                void* tight = Z_Malloc(outbuf_len, PU_STATIC, NULL);
                 if (tight) memcpy(tight, outbuf, outbuf_len);
                 mem_fclose(outstream); outstream = NULL;
                 mem_fclose(instream);  instream  = NULL;
                 if (!tight)
                 {
-                    doom_trace("RegisterSong: tight-copy malloc failed");
+                    doom_trace("RegisterSong: tight-copy Z_Malloc failed");
                 }
                 else
                 {
                     result = MIDI_LoadBuffer(tight, outbuf_len);
-                    free(tight);
+                    Z_Free(tight);
                     if (!result)
                     {
                         char buf[80];

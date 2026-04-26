@@ -132,8 +132,9 @@ static void cache_drop(cached_sound_t* c) {
     cache_unlink(c);
     if (c->sfx) c->sfx->driver_data = NULL;
     g_cache_bytes -= c->bytes;
-    free(c->pcm);
-    free(c);
+    // sx-doom-overlay: SFX storage in Doom zone (Z_Malloc), like vanilla.
+    Z_Free(c->pcm);
+    Z_Free(c);
 }
 
 // Evict from tail until adding `need` more bytes would still fit under cap.
@@ -187,7 +188,10 @@ static boolean decode_dmx(const uint8_t* data, size_t len,
     if (real_length <= 0) return false;
     const uint8_t* samples = data + 8 + 16;
 
-    int16_t* pcm = (int16_t*)malloc((size_t)real_length * sizeof(int16_t));
+    // sx-doom-overlay: SFX PCM lives in Doom zone (Z_Malloc), like vanilla.
+    // Eliminates LRU eviction churn against newlib heap.
+    int16_t* pcm = (int16_t*)Z_Malloc((size_t)real_length * sizeof(int16_t),
+                                      PU_STATIC, NULL);
     if (!pcm) return false;
 
     // 8-bit unsigned → 16-bit signed at SOURCE rate. No resampling here —
@@ -246,19 +250,20 @@ static cached_sound_t* cache_get_or_load(sfxinfo_t* sfx) {
                  "cache_load: %s too big (%zuB > cap %dB) — dropped",
                  sfx->name, bytes, SFX_CACHE_CAP_BYTES);
         doom_trace(dbg);
-        free(pcm);
+        Z_Free(pcm);
         return NULL;
     }
     if (!cache_make_room(bytes)) {
-        free(pcm);
+        Z_Free(pcm);
         return NULL;
     }
 
-    cached_sound_t* c = (cached_sound_t*)calloc(1, sizeof(*c));
+    cached_sound_t* c = (cached_sound_t*)Z_Malloc(sizeof(*c), PU_STATIC, NULL);
     if (!c) {
-        free(pcm);
+        Z_Free(pcm);
         return NULL;
     }
+    memset(c, 0, sizeof(*c));
     c->pcm         = pcm;
     c->length      = frames;
     c->bytes       = bytes;
