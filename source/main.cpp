@@ -139,13 +139,13 @@ class DoomElement final : public tsl::elm::Element {
         // If engine init failed, render the error message instead of trying
         // to blit garbage from an uninitialized DG_ScreenBuffer.
         if (g_doom_failed) {
-            renderer->fillScreen(tsl::Color(0x000F));  // black
+            renderer->fillScreen(tsl::Color(0xF000));  // black
             renderer->drawString("Doom engine init failed:", false, 16, 32, 22, tsl::Color(0xFFFF));
             renderer->drawString(g_doom_error_msg,           false, 16, 64, 18, tsl::Color(0xFA0F));
             return;
         }
         if (!g_doom_initialized) {
-            renderer->fillScreen(tsl::Color(0x000F));
+            renderer->fillScreen(tsl::Color(0xF000));
             renderer->drawString("Loading Doom...", false, 16, 32, 22, tsl::Color(0xFFFF));
             return;
         }
@@ -235,15 +235,23 @@ class DoomGui final : public tsl::Gui {
         int ticks_run = 0;
         while (accum_ns >= kTickPeriodNs && ticks_run < kMaxCatchupTicks) {
             static unsigned tick_count = 0;
-            // Log every 35 ticks (~1 sec) so we can see how far the engine got
-            // before any crash. After ~5 sec we stop logging to avoid disk spam.
-            if ((tick_count % 35) == 0 && tick_count < 35 * 10) {
+            // Trace.log decoded prior crash to between tick 140 and 175.
+            // To narrow further: log every tick from 130 to 200 (the danger
+            // zone), every 5th tick before that. After tick 200 stop to
+            // avoid disk spam if we're past the crash point.
+            const bool log_this_tick =
+                (tick_count < 130 && (tick_count % 35) == 0) ||
+                (tick_count >= 130 && tick_count < 200);
+            if (log_this_tick) {
                 char buf[64];
-                std::snprintf(buf, sizeof(buf), "tick %u (sec %u)", tick_count, tick_count / 35);
+                std::snprintf(buf, sizeof(buf), "tick %u → calling Tick", tick_count);
                 doom_trace(buf);
             }
             tick_count++;
             doomgeneric_Tick();
+            if (log_this_tick) {
+                doom_trace("Tick returned OK");
+            }
             accum_ns -= kTickPeriodNs;
             ticks_run++;
         }
