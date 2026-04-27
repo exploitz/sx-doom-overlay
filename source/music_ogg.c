@@ -158,11 +158,22 @@ static int try_open_path_locked(const char* path) {
     return 1;
 }
 
-// Resolve the music buffer to a filename and open it. Tries
+// Aliases for engine-side lump remaps that depend on snd_musicdevice.
+// Vanilla chocolate-doom's S_ChangeMusic turns mus_intro into mus_introa
+// when snd_musicdevice is ADLIB or SB (the default). Most third-party OGG
+// packs (including the canonical archive.org SC-55 set) only ship the
+// non-aliased "intro" track. If the aliased file is missing, fall back to
+// the canonical one before going to the silent test fallback.
+static const char* music_name_alias(const char* name) {
+    if (!name) return NULL;
+    if (strcmp(name, "introa") == 0) return "intro";    // OPL alias
+    return NULL;
+}
+
+// Resolve the music buffer to a filename and open it. Tries, in order:
 //   <MUSIC_DIR>/d_<name>.ogg
-// then falls back to
-//   <MUSIC_DIR>/test.ogg
-// so a user without a full pack can still verify the audio chain.
+//   <MUSIC_DIR>/d_<alias>.ogg     (only for names with a known alias)
+//   <MUSIC_DIR>/test.ogg          (final smoke-test fallback)
 // Caller must hold the music mutex.
 static int open_song_for_buffer_locked(const void* buf) {
     const char* name = lookup_music_name(buf);
@@ -170,6 +181,12 @@ static int open_song_for_buffer_locked(const void* buf) {
         char path[256];
         snprintf(path, sizeof(path), "%s/d_%s.ogg", MUSIC_DIR, name);
         if (try_open_path_locked(path)) return 1;
+
+        const char* alias = music_name_alias(name);
+        if (alias) {
+            snprintf(path, sizeof(path), "%s/d_%s.ogg", MUSIC_DIR, alias);
+            if (try_open_path_locked(path)) return 1;
+        }
     }
     // Fallback for first-launch smoke tests / users without a full pack.
     return try_open_path_locked(MUSIC_TEST_PATH);
