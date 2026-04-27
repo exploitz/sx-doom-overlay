@@ -479,47 +479,28 @@ sound_module_t DG_sound_module = {
 };
 
 // -----------------------------------------------------------------------------
-// DG_music_module — alias to chocolate-doom's music_opl_module (vendored from
-// source/opl/i_oplmusic.c). i_sound.c references DG_music_module by name; we
-// satisfy that by defining DG_music_module as a copy of music_opl_module's
-// function pointers. The OPL driver renders on the audio submit thread via
-// OPL_LIBNX_Render (called from audio_backend_libnx.c::submit_thread_main).
+// DG_music_module — alias to source/music_ogg.c::music_ogg_module.
+//
+// On this branch (feat/task-9b-ogg-music) we wire DG_music_module to the
+// OGG decoder instead of OPL. Both the OPL stack (source/opl/) and the
+// OGG stack (source/music_ogg.{c,h} + source/stb_vorbis_impl.h) compile
+// in — only this DG_music_module wiring decides which one the engine
+// actually drives. Switching back to OPL is a one-line edit here.
 // -----------------------------------------------------------------------------
 
-extern music_module_t music_opl_module;  // source/opl/i_oplmusic.c
+extern music_module_t music_ogg_module;  // source/music_ogg.c
 
-static boolean DGMusic_Init(void) {
-    // music_opl_module's Init expects OPL to be set up. i_oplmusic calls
-    // OPL_Init internally — see I_OPL_InitMusic.
-    boolean ok = music_opl_module.Init();
-    char buf[64];
-    snprintf(buf, sizeof(buf), "DGMusic_Init: music_opl_module.Init -> %d", (int)ok);
-    doom_trace(buf);
-    return ok;
-}
-static void    DGMusic_Shutdown(void)        { music_opl_module.Shutdown(); }
-static void    DGMusic_SetVolume(int v)      { music_opl_module.SetMusicVolume(v); }
-static void    DGMusic_Pause(void)           { music_opl_module.PauseMusic(); }
-static void    DGMusic_Resume(void)          { music_opl_module.ResumeMusic(); }
-static void*   DGMusic_Register(void* d, int l) {
-    void* h = music_opl_module.RegisterSong(d, l);
-    char buf[64];
-    snprintf(buf, sizeof(buf), "DGMusic_Register: len=%d -> handle=%p", l, h);
-    doom_trace(buf);
-    return h;
-}
-static void    DGMusic_UnRegister(void* h)   { music_opl_module.UnRegisterSong(h); }
-static void    DGMusic_Play(void* h, boolean l) {
-    char buf[64];
-    snprintf(buf, sizeof(buf), "DGMusic_Play: handle=%p loop=%d", h, (int)l);
-    doom_trace(buf);
-    music_opl_module.PlaySong(h, l);
-}
-static void    DGMusic_Stop(void)            { music_opl_module.StopSong(); }
-static boolean DGMusic_IsPlaying(void)       { return music_opl_module.MusicIsPlaying(); }
-static void    DGMusic_Poll(void) {
-    if (music_opl_module.Poll) music_opl_module.Poll();
-}
+static boolean DGMusic_Init(void)              { return music_ogg_module.Init(); }
+static void    DGMusic_Shutdown(void)          { music_ogg_module.Shutdown(); }
+static void    DGMusic_SetVolume(int v)        { music_ogg_module.SetMusicVolume(v); }
+static void    DGMusic_Pause(void)             { music_ogg_module.PauseMusic(); }
+static void    DGMusic_Resume(void)            { music_ogg_module.ResumeMusic(); }
+static void*   DGMusic_Register(void* d, int l){ return music_ogg_module.RegisterSong(d, l); }
+static void    DGMusic_UnRegister(void* h)     { music_ogg_module.UnRegisterSong(h); }
+static void    DGMusic_Play(void* h, boolean l){ music_ogg_module.PlaySong(h, l); }
+static void    DGMusic_Stop(void)              { music_ogg_module.StopSong(); }
+static boolean DGMusic_IsPlaying(void)         { return music_ogg_module.MusicIsPlaying(); }
+static void    DGMusic_Poll(void)              { if (music_ogg_module.Poll) music_ogg_module.Poll(); }
 
 music_module_t DG_music_module = {
     NULL, 0,                  // device list ignored — InitMusicModule binds
