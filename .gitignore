@@ -22,6 +22,11 @@ lib/doomgeneric/.patched
 data/freedoom1.wad
 data/*.wad
 
+# Music pack — third-party recordings (e.g. Brandon Blume Roland SC-55 pack
+# from archive.org). Not redistributed by us; user fetches/renders their own.
+data/music/
+data/test.ogg
+
 # Desktop test outputs
 tests/desktop/out/
 tests/desktop/*.wav

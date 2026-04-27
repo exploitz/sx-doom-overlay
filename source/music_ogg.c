@@ -79,9 +79,18 @@ static struct {
     int            paused;
     int            looping;
     int            volume;           // 0..127 (Doom's range)
-    int            sample_rate;      // OGG native — informational only
+    int            sample_rate;      // OGG native (44100 or 48000 typical)
     int            stream_channels;  // OGG native — usually 1 or 2
+
+    // Linear-interp resampler state, only used when sample_rate != 48000.
+    // 16.16 fixed-point sub-sample position into a virtual stream where
+    // sample -1 is `carry` (the last source frame from the prior render).
+    uint32_t       resample_phase_q16;
+    int16_t        resample_carry_l;
+    int16_t        resample_carry_r;
 } g_music;
+
+#define MUSIC_OUTPUT_RATE 48000
 
 #ifdef __SWITCH__
 #define MUSIC_LOCK()    mutexLock(&g_music.mtx)
@@ -102,6 +111,11 @@ static void close_decoder_locked(void) {
     }
     g_music.playing = 0;
     g_music.paused  = 0;
+    // Reset resampler so a new song doesn't pick up the previous song's
+    // tail-end sample as its interp partner.
+    g_music.resample_phase_q16 = 0;
+    g_music.resample_carry_l   = 0;
+    g_music.resample_carry_r   = 0;
 }
 
 // Walk the engine's S_music[] table to find the entry whose `data` pointer
@@ -291,6 +305,31 @@ music_module_t music_ogg_module = {
 // produced; we treat any short read as "EOF reached" and either loop
 // (re-seek to start) or stop.
 
+// Decode `frames` stereo frames into `out`, looping or stopping on EOF
+// per g_music.looping. Always returns `frames` (pads with silence past
+// EOF when not looping). Caller must hold the music mutex.
+static void decode_with_loop_locked(int16_t* out, int frames) {
+    int produced = 0;
+    while (produced < frames) {
+        const int want = frames - produced;
+        int got = stb_vorbis_get_samples_short_interleaved(
+            g_music.decoder, MUSIC_CHANNELS,
+            out + produced * MUSIC_CHANNELS,
+            want * MUSIC_CHANNELS);
+        if (got <= 0) {
+            if (g_music.looping) {
+                stb_vorbis_seek_start(g_music.decoder);
+                continue;
+            }
+            memset(out + produced * MUSIC_CHANNELS, 0,
+                   (frames - produced) * MUSIC_CHANNELS * sizeof(int16_t));
+            g_music.playing = 0;
+            return;
+        }
+        produced += got;
+    }
+}
+
 void music_ogg_render(int16_t* dst, size_t frames) {
     MUSIC_LOCK();
 
@@ -300,34 +339,69 @@ void music_ogg_render(int16_t* dst, size_t frames) {
         return;
     }
 
-    size_t produced = 0;
-    while (produced < frames) {
-        const int want = (int)(frames - produced);
-        int got = stb_vorbis_get_samples_short_interleaved(
-            g_music.decoder,
-            MUSIC_CHANNELS,
-            dst + produced * MUSIC_CHANNELS,
-            want * MUSIC_CHANNELS);
-        if (got <= 0) {
-            if (g_music.looping) {
-                stb_vorbis_seek_start(g_music.decoder);
-                continue;  // try again from the top
+    const int in_rate = g_music.sample_rate;
+
+    if (in_rate == MUSIC_OUTPUT_RATE) {
+        // Native rate, no resampling.
+        decode_with_loop_locked(dst, (int)frames);
+    } else {
+        // Linear-interp resample, 16.16 fixed-point phase.
+        // Sized for FRAMES_PER_BUF=1100 output frames at any input rate up
+        // to 2× output (i.e. 96 kHz source → 48 kHz output). Doom OST OGGs
+        // are 44.1 or 48 kHz; this is generous slop.
+        static int16_t scratch[2400 * MUSIC_CHANNELS];
+        const int max_in = sizeof(scratch) / (MUSIC_CHANNELS * sizeof(int16_t));
+
+        const uint32_t step = (uint32_t)(((uint64_t)in_rate << 16) / MUSIC_OUTPUT_RATE);
+        const uint64_t end_phase = (uint64_t)g_music.resample_phase_q16
+                                 + (uint64_t)step * (uint64_t)frames;
+        // ceil(end_phase / 2^16) — number of source frames we need to
+        // decode this call. Always ≥ 1 so the carry update below is sane.
+        int needed = (int)((end_phase + 0xFFFFu) >> 16);
+        if (needed < 1)        needed = 1;
+        if (needed > max_in)   needed = max_in;
+
+        decode_with_loop_locked(scratch, needed);
+
+        uint32_t       phase  = g_music.resample_phase_q16;
+        const int16_t  prev_l = g_music.resample_carry_l;
+        const int16_t  prev_r = g_music.resample_carry_r;
+
+        for (size_t i = 0; i < frames; ++i) {
+            const uint32_t idx  = phase >> 16;
+            const uint32_t frac = phase & 0xFFFFu;
+            int16_t l0, r0, l1, r1;
+            if (idx == 0) {
+                l0 = prev_l; r0 = prev_r;
             } else {
-                // Pad remainder with silence and stop.
-                memset(dst + produced * MUSIC_CHANNELS, 0,
-                       (frames - produced) * MUSIC_CHANNELS * sizeof(int16_t));
-                g_music.playing = 0;
-                break;
+                l0 = scratch[(idx - 1) * MUSIC_CHANNELS + 0];
+                r0 = scratch[(idx - 1) * MUSIC_CHANNELS + 1];
             }
+            if ((int)idx >= needed) {
+                // End-of-buffer guard; in normal operation idx < needed.
+                l1 = l0; r1 = r0;
+            } else {
+                l1 = scratch[idx * MUSIC_CHANNELS + 0];
+                r1 = scratch[idx * MUSIC_CHANNELS + 1];
+            }
+            const int32_t l = (int32_t)l0
+                + (((int32_t)(l1 - l0) * (int32_t)frac) >> 16);
+            const int32_t r = (int32_t)r0
+                + (((int32_t)(r1 - r0) * (int32_t)frac) >> 16);
+            dst[i * MUSIC_CHANNELS + 0] = (int16_t)l;
+            dst[i * MUSIC_CHANNELS + 1] = (int16_t)r;
+            phase += step;
         }
-        produced += (size_t)got;
+
+        g_music.resample_phase_q16 = (uint32_t)(end_phase & 0xFFFFu);
+        g_music.resample_carry_l   = scratch[(needed - 1) * MUSIC_CHANNELS + 0];
+        g_music.resample_carry_r   = scratch[(needed - 1) * MUSIC_CHANNELS + 1];
     }
 
-    // Volume scale (0..127 → 0..256). Skip the multiply when at full
-    // volume to save cycles in the common case.
+    // Volume scale (0..127 → 0..256). Skip the multiply at full volume.
     if (g_music.volume < 127) {
         const int32_t v = (g_music.volume * 256) / 127;
-        const size_t total = produced * MUSIC_CHANNELS;
+        const size_t total = frames * MUSIC_CHANNELS;
         for (size_t i = 0; i < total; ++i) {
             dst[i] = (int16_t)(((int32_t)dst[i] * v) >> 8);
         }
