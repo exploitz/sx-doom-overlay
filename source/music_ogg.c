@@ -32,6 +32,7 @@
 #include "doomtype.h"
 #include "i_sound.h"
 #include "sounds.h"   // S_music[], NUMMUSIC, musicinfo_t
+#include "z_zone.h"   // Z_Malloc
 
 // Pulldata file API only — we don't need pushdata for streaming from disk.
 // Keep integer conversion path on (we use stb_vorbis_get_samples_short).
@@ -61,18 +62,24 @@ extern void doom_trace(const char* msg);
 // a "drop one OGG and hear it on every track" smoke test.
 #define MUSIC_TEST_PATH  MUSIC_DIR "/test.ogg"
 
-// stb_vorbis allocation buffer. stb_vorbis defaults to malloc() from the
-// system heap; on Switch overlays our newlib pool is heavily pressured
-// already (SFX cache, libnx services, libtesla framebuffer) and a fresh
-// stb_vorbis_open + first-decode burst can fail-or-crash mid-allocation.
-// Giving stb_vorbis a fixed BSS-backed scratch buffer takes those allocs
-// out of newlib entirely. 256 KB is the documented "comfortable" working
-// size — covers OGG setup headers + per-frame decode state for stereo
-// 44.1/48 kHz tracks. If a future OGG ever needs more, stb_vorbis_open
-// returns NULL with err=VORBIS_outofmem and we fall through to silence
-// rather than crashing.
+// stb_vorbis allocation buffer.
+//
+// stb_vorbis defaults to malloc() from newlib heap; on Switch overlays
+// that pool is heavily pressured (SFX cache, libnx services) and the
+// first-decode allocation burst (~150-200 KB) can crash mid-alloc.
+//
+// We allocate from Doom's Z_Malloc zone instead. Trade-offs vs BSS:
+//   - BSS: 256 KB cost is paid in binary size + loader image footprint,
+//     coming out of the 8 MB overlay slider before our heap pool is
+//     even sized. Pure addition to total memory use.
+//   - Z_Malloc: borrows from the 4 MiB Doom zone where we currently use
+//     ~3.5 MiB at peak. 256 KB there is invisible. Zero binary growth,
+//     zero impact on newlib heap, zero impact on the 8 MB ceiling beyond
+//     what the engine already commits. Only constraint is timing —
+//     Z_Init must have run, which it has by the time S_Init →
+//     InitMusicModule → DGMusic_Init runs.
 #define MUSIC_ALLOC_BYTES (256 * 1024)
-static char music_alloc_buffer[MUSIC_ALLOC_BYTES] __attribute__((aligned(16)));
+static char* music_alloc_buffer = NULL;  // Z_Malloc'd in MusicInit
 
 // stb_vorbis returns floats internally; the int16 helper clamps to int16
 // range. We get stereo by passing channels=2; mono OGGs will upmix as
@@ -158,11 +165,14 @@ static const char* lookup_music_name(const void* buf) {
 // Returns 1 on success and populates g_music.decoder, 0 otherwise.
 static int try_open_path_locked(const char* path) {
     int err = 0;
-    stb_vorbis_alloc alloc = {
-        music_alloc_buffer,
-        MUSIC_ALLOC_BYTES,
-    };
-    stb_vorbis* v = stb_vorbis_open_filename(path, &err, &alloc);
+    stb_vorbis_alloc alloc;
+    stb_vorbis_alloc* alloc_ptr = NULL;
+    if (music_alloc_buffer) {
+        alloc.alloc_buffer            = music_alloc_buffer;
+        alloc.alloc_buffer_length_in_bytes = MUSIC_ALLOC_BYTES;
+        alloc_ptr = &alloc;
+    }
+    stb_vorbis* v = stb_vorbis_open_filename(path, &err, alloc_ptr);
     if (!v) {
         char tbuf[200];
         snprintf(tbuf, sizeof(tbuf),
@@ -231,7 +241,18 @@ static boolean MusicInit(void) {
     g_music.volume          = 127;
     g_music.sample_rate     = 0;
     g_music.stream_channels = 0;
-    doom_trace("music_ogg: Init");
+
+    // Allocate stb_vorbis scratch from the Doom zone. PU_STATIC keeps it
+    // pinned for the engine's lifetime so subsequent W_Read / Z_Malloc
+    // churn never relocates or evicts our buffer.
+    if (!music_alloc_buffer) {
+        music_alloc_buffer = Z_Malloc(MUSIC_ALLOC_BYTES, PU_STATIC, NULL);
+    }
+    char tbuf[120];
+    snprintf(tbuf, sizeof(tbuf),
+             "music_ogg: Init (alloc_buffer=%p, %d KB)",
+             (void*)music_alloc_buffer, MUSIC_ALLOC_BYTES / 1024);
+    doom_trace(tbuf);
     return true;
 }
 
