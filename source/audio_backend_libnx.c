@@ -36,6 +36,7 @@
 
 #include "audio_backend.h"
 #include "audio_glue.h"
+#include "music_ogg.h"
 
 #ifdef __SWITCH__
 
@@ -131,10 +132,12 @@ static void submit_thread_main(void* arg) {
     const uint64_t BUF_DURATION_NS =
         ((uint64_t)FRAMES_PER_BUF * 1000000000ULL) / (uint64_t)AUDIO_BACKEND_SAMPLE_RATE;
 
-    // Music render scratch (stereo int16). OPL_LIBNX_Render fills this
-    // each iteration; we then mix it additively into the SFX-filled output
-    // buffer with int16 clamping. Lives in BSS to avoid per-iteration
-    // allocation. Sized for the largest single submit (FRAMES_PER_BUF=1100).
+    // Music render scratch (stereo int16). music_ogg_render fills this
+    // each iteration; we then mix it additively into the SFX-filled
+    // output buffer with int16 clamping. Lives in BSS to avoid per-
+    // iteration allocation. Sized for FRAMES_PER_BUF stereo frames.
+    // (OPL stack is also compiled in but unused while DG_music_module
+    // points at music_ogg_module — see source/i_sound_switch.c.)
     static int16_t music_scratch[FRAMES_PER_BUF * AUDIO_BACKEND_CHANNELS];
 
     while (be->running) {
@@ -144,26 +147,15 @@ static void submit_thread_main(void* arg) {
         // SFX path: ring_drain pulls SFX-only PCM from the engine.
         ring_drain(be, out, FRAMES_PER_BUF);
 
-        // Music path: render OPL2 directly into music_scratch, then mix on
-        // top of the SFX with HEADROOM-SCALED summation. OPL_LIBNX_Render
-        // runs entirely on this thread under the OPL driver's own queue
-        // mutex (no contention with the audio backend's ring_mtx).
-        //
-        // Bus-mix math: each source scaled by SCALE/256 before summation,
-        // so the worst-case sum is 2 * (SCALE/256) * INT16_MAX. With
-        // SCALE=192 (75%): max sum ≈ 1.5 * INT16_MAX → clipping only
-        // when both signals peak simultaneously, and the saturated edge
-        // is short rather than a sustained square wave (much less audible
-        // distortion than the prior plain `add + hard clamp`).
-        OPL_LIBNX_Render(music_scratch, FRAMES_PER_BUF);
+        // Music path: stream OGG into music_scratch on this thread, then
+        // mix additively. SFX already pre-boosts via compute_lr in the
+        // i_sound_switch.c path; music starts ~half-scale so the additive
+        // sum stays under int16 unless both peak simultaneously, in which
+        // case the saturator below catches it.
+        music_ogg_render(music_scratch, FRAMES_PER_BUF);
         const int total_samples = FRAMES_PER_BUF * AUDIO_BACKEND_CHANNELS;
-        // sx-doom-overlay: With compute_lr's 2x boost, a max-volume SFX
-        // already hits ~95% of int16 unscaled. Bus-mix scales reduced to
-        // ~62% per source so the sum stays under int16 even with multiple
-        // simultaneous loud SFX + OPL music — eliminates the hard clip
-        // "distortion at high volume" bug.
-        const int32_t SFX_SCALE   = 160;   // 62% — extra headroom for
-        const int32_t MUSIC_SCALE = 160;   // peak coexistence without clip
+        const int32_t SFX_SCALE   = 160;   // 62%
+        const int32_t MUSIC_SCALE = 160;   // 62%
         for (int i = 0; i < total_samples; ++i) {
             int32_t s = ((int32_t)out[i] * SFX_SCALE
                        + (int32_t)music_scratch[i] * MUSIC_SCALE) >> 8;
