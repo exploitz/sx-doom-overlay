@@ -38,6 +38,10 @@
 #include "audio_glue.h"
 #include "music_ogg.h"
 
+#include <stdio.h>
+
+extern void doom_trace(const char* msg);
+
 #ifdef __SWITCH__
 
 #include <stdlib.h>
@@ -144,8 +148,21 @@ static void submit_thread_main(void* arg) {
         AudioOutBuffer* buf = &be->buffers[be->next_slot];
         int16_t* const out = (int16_t*)buf->buffer;
 
+        // Diagnostic counter so we can localize where in the submit-thread
+        // loop a crash happens. Logged at iteration 1 and 2 (the critical
+        // first-decode flow), then every 100 iterations after.
+        static uint32_t submit_iter = 0;
+        submit_iter++;
+        const int log_step = (submit_iter <= 2) || ((submit_iter % 100) == 0);
+        char tbuf[80];
+
         // SFX path: ring_drain pulls SFX-only PCM from the engine.
         ring_drain(be, out, FRAMES_PER_BUF);
+        if (log_step) {
+            snprintf(tbuf, sizeof(tbuf),
+                     "submit iter=%u: post-ring_drain", submit_iter);
+            doom_trace(tbuf);
+        }
 
         // Music path: stream OGG into music_scratch on this thread, then
         // mix additively. SFX already pre-boosts via compute_lr in the
@@ -153,6 +170,12 @@ static void submit_thread_main(void* arg) {
         // sum stays under int16 unless both peak simultaneously, in which
         // case the saturator below catches it.
         music_ogg_render(music_scratch, FRAMES_PER_BUF);
+        if (log_step) {
+            snprintf(tbuf, sizeof(tbuf),
+                     "submit iter=%u: post-music_ogg_render", submit_iter);
+            doom_trace(tbuf);
+        }
+
         const int total_samples = FRAMES_PER_BUF * AUDIO_BACKEND_CHANNELS;
         const int32_t SFX_SCALE   = 160;   // 62%
         const int32_t MUSIC_SCALE = 160;   // 62%
@@ -162,6 +185,11 @@ static void submit_thread_main(void* arg) {
             if (s >  32767) s =  32767;
             if (s < -32768) s = -32768;
             out[i] = (int16_t)s;
+        }
+        if (log_step) {
+            snprintf(tbuf, sizeof(tbuf),
+                     "submit iter=%u: post-bus-mix", submit_iter);
+            doom_trace(tbuf);
         }
 
         buf->data_size   = BYTES_PER_BUF;

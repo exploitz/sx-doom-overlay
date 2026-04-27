@@ -119,6 +119,11 @@ static struct {
     // never reached decode" from "decode ran but produced nothing." Reset
     // by close_decoder_locked.
     int            first_decode_logged;
+
+    // Counts every music_ogg_render entry. Logged every 50 calls so we
+    // can see in trace.log how far the audio thread got past the first
+    // decode without spamming the log.
+    uint32_t       render_call_count;
 } g_music;
 
 #define MUSIC_OUTPUT_RATE 48000
@@ -420,6 +425,19 @@ static void decode_with_loop_locked(int16_t* out, int frames) {
 
 void music_ogg_render(int16_t* dst, size_t frames) {
     MUSIC_LOCK();
+
+    g_music.render_call_count++;
+    // Log every 50th render so we can see in trace.log how far past the
+    // first decode the audio thread gets before any crash. Spaced sparsely
+    // so it doesn't dominate the log.
+    if ((g_music.render_call_count % 50) == 1 && g_music.decoder) {
+        char tbuf[140];
+        snprintf(tbuf, sizeof(tbuf),
+                 "music_ogg: render #%u (playing=%d looping=%d in_rate=%d phase=%u)",
+                 g_music.render_call_count, g_music.playing, g_music.looping,
+                 g_music.sample_rate, g_music.resample_phase_q16);
+        doom_trace(tbuf);
+    }
 
     if (!g_music.playing || g_music.paused || !g_music.decoder) {
         memset(dst, 0, frames * MUSIC_CHANNELS * sizeof(int16_t));
