@@ -61,6 +61,19 @@ extern void doom_trace(const char* msg);
 // a "drop one OGG and hear it on every track" smoke test.
 #define MUSIC_TEST_PATH  MUSIC_DIR "/test.ogg"
 
+// stb_vorbis allocation buffer. stb_vorbis defaults to malloc() from the
+// system heap; on Switch overlays our newlib pool is heavily pressured
+// already (SFX cache, libnx services, libtesla framebuffer) and a fresh
+// stb_vorbis_open + first-decode burst can fail-or-crash mid-allocation.
+// Giving stb_vorbis a fixed BSS-backed scratch buffer takes those allocs
+// out of newlib entirely. 256 KB is the documented "comfortable" working
+// size — covers OGG setup headers + per-frame decode state for stereo
+// 44.1/48 kHz tracks. If a future OGG ever needs more, stb_vorbis_open
+// returns NULL with err=VORBIS_outofmem and we fall through to silence
+// rather than crashing.
+#define MUSIC_ALLOC_BYTES (256 * 1024)
+static char music_alloc_buffer[MUSIC_ALLOC_BYTES] __attribute__((aligned(16)));
+
 // stb_vorbis returns floats internally; the int16 helper clamps to int16
 // range. We get stereo by passing channels=2; mono OGGs will upmix as
 // stb_vorbis duplicates the single channel.
@@ -88,6 +101,12 @@ static struct {
     uint32_t       resample_phase_q16;
     int16_t        resample_carry_l;
     int16_t        resample_carry_r;
+
+    // Diagnostic: set to 1 after the first decode_with_loop_locked call
+    // following a song change. Lets trace.log distinguish "audio thread
+    // never reached decode" from "decode ran but produced nothing." Reset
+    // by close_decoder_locked.
+    int            first_decode_logged;
 } g_music;
 
 #define MUSIC_OUTPUT_RATE 48000
@@ -116,6 +135,7 @@ static void close_decoder_locked(void) {
     g_music.resample_phase_q16 = 0;
     g_music.resample_carry_l   = 0;
     g_music.resample_carry_r   = 0;
+    g_music.first_decode_logged = 0;
 }
 
 // Walk the engine's S_music[] table to find the entry whose `data` pointer
@@ -138,7 +158,11 @@ static const char* lookup_music_name(const void* buf) {
 // Returns 1 on success and populates g_music.decoder, 0 otherwise.
 static int try_open_path_locked(const char* path) {
     int err = 0;
-    stb_vorbis* v = stb_vorbis_open_filename(path, &err, NULL);
+    stb_vorbis_alloc alloc = {
+        music_alloc_buffer,
+        MUSIC_ALLOC_BYTES,
+    };
+    stb_vorbis* v = stb_vorbis_open_filename(path, &err, &alloc);
     if (!v) {
         char tbuf[200];
         snprintf(tbuf, sizeof(tbuf),
@@ -326,6 +350,18 @@ music_module_t music_ogg_module = {
 // per g_music.looping. Always returns `frames` (pads with silence past
 // EOF when not looping). Caller must hold the music mutex.
 static void decode_with_loop_locked(int16_t* out, int frames) {
+    // Diagnostic: log the very first decode after a song change so we can
+    // tell from trace.log whether the audio thread is reaching the decoder
+    // at all (vs crashing on the first call). g_first_decode_logged is
+    // reset by close_decoder_locked, so we get one trace per song.
+    if (!g_music.first_decode_logged) {
+        g_music.first_decode_logged = 1;
+        char tbuf[120];
+        snprintf(tbuf, sizeof(tbuf),
+                 "music_ogg: first decode want=%d decoder=%p",
+                 frames, (void*)g_music.decoder);
+        doom_trace(tbuf);
+    }
     int produced = 0;
     while (produced < frames) {
         const int want = frames - produced;
