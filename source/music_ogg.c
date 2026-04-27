@@ -78,7 +78,12 @@ extern void doom_trace(const char* msg);
 //     what the engine already commits. Only constraint is timing —
 //     Z_Init must have run, which it has by the time S_Init →
 //     InitMusicModule → DGMusic_Init runs.
-#define MUSIC_ALLOC_BYTES (256 * 1024)
+// stb_vorbis's documented "comfortable" minimum is ~150 KB but real-world
+// usage during decode can spike higher (codebook decoders, frame state
+// per active book). 256 KB previously reached decode but crashed mid-call,
+// strongly suggesting buffer overrun. Doubling to 512 KB. Cost is invisible
+// in the 4 MiB Doom zone — engine peak is still ~3.5 MiB, leaves margin.
+#define MUSIC_ALLOC_BYTES (512 * 1024)
 static char* music_alloc_buffer = NULL;  // Z_Malloc'd in MusicInit
 
 // stb_vorbis returns floats internally; the int16 helper clamps to int16
@@ -373,13 +378,15 @@ music_module_t music_ogg_module = {
 static void decode_with_loop_locked(int16_t* out, int frames) {
     // Diagnostic: log the very first decode after a song change so we can
     // tell from trace.log whether the audio thread is reaching the decoder
-    // at all (vs crashing on the first call). g_first_decode_logged is
-    // reset by close_decoder_locked, so we get one trace per song.
-    if (!g_music.first_decode_logged) {
+    // at all (vs crashing on the first call). Two markers — entry and a
+    // post-call complete — bracket the stb_vorbis_get_samples call so we
+    // can localize crashes inside vs outside the decoder.
+    const int log_first = !g_music.first_decode_logged;
+    if (log_first) {
         g_music.first_decode_logged = 1;
         char tbuf[120];
         snprintf(tbuf, sizeof(tbuf),
-                 "music_ogg: first decode want=%d decoder=%p",
+                 "music_ogg: first decode ENTER want=%d decoder=%p",
                  frames, (void*)g_music.decoder);
         doom_trace(tbuf);
     }
@@ -390,6 +397,13 @@ static void decode_with_loop_locked(int16_t* out, int frames) {
             g_music.decoder, MUSIC_CHANNELS,
             out + produced * MUSIC_CHANNELS,
             want * MUSIC_CHANNELS);
+        if (log_first) {
+            // Only log the very first call's return so we don't spam.
+            char tbuf[120];
+            snprintf(tbuf, sizeof(tbuf),
+                     "music_ogg: first decode RETURN got=%d", got);
+            doom_trace(tbuf);
+        }
         if (got <= 0) {
             if (g_music.looping) {
                 stb_vorbis_seek_start(g_music.decoder);
