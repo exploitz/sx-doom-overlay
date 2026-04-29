@@ -453,11 +453,11 @@ inline void draw_doom_viewport(tsl::gfx::Renderer* renderer,
                              kDoomOffsetY + kScaledH + 18, 14,
                              tsl::Color(0xCFFF));
 
-        // Build identity — git branch@hash[+] from Makefile -DAPP_VERSION.
+        // Build identity — git branch@hash[+] from Makefile -DBUILD_ID.
         // Lets us tell at a glance which build is on the Switch (Ethan / me /
         // OPL branch / OGG branch all look identical otherwise).
-#ifdef APP_VERSION
-        renderer->drawString("build: " APP_VERSION, false, 20,
+#ifdef BUILD_ID
+        renderer->drawString("build: " BUILD_ID, false, 20,
                              kDoomOffsetY + kScaledH + 36, 13,
                              tsl::Color(0x9FFF));
 #endif
