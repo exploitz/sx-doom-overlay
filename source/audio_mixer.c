@@ -77,8 +77,18 @@ void audio_mixer_mix(audio_mixer_t* m, int16_t* dst, size_t frames) {
     const uint64_t length_fp_max = ((uint64_t)0xFFFFFFFFFFFFFFFFULL);
     (void)length_fp_max;
 
+    // Smoothed active-channel count for per-frame normalization. We track
+    // an exponential follower (s_norm_q8 in 8.8 fixed point) instead of
+    // dividing by the raw active count each frame — a sound starting or
+    // ending mid-tic would produce an audible amplitude step on sustained
+    // sounds otherwise. Time constant ~10 ms at 48 kHz.
+    static int32_t s_norm_q8 = 1 << 8;   // == 1.0 at startup
+    const int32_t  one_q8    = 1 << 8;
+    const int32_t  alpha     = 12;       // out of 256 — smoothing aggressiveness
+
     for (size_t f = 0; f < frames; ++f) {
         int32_t acc_l = 0, acc_r = 0;
+        int active_count = 0;
 
         for (int s = 0; s < AUDIO_MIXER_CHANNELS; ++s) {
             audio_mixer_channel_t* c = &m->chans[s];
@@ -105,13 +115,29 @@ void audio_mixer_mix(audio_mixer_t* m, int16_t* dst, size_t frames) {
 
             acc_l += (sample * (int32_t)c->vol_l) / 255;
             acc_r += (sample * (int32_t)c->vol_r) / 255;
+            active_count++;
 
             c->pos_fp += c->step_fp;
         }
 
+        // Average instead of sum: per-frame normalization by the smoothed
+        // active count keeps the output peak at single-sound max regardless
+        // of how many channels are firing. No more clipping when 4-8 sounds
+        // collide (gunshots + monster pain + door slams). Single sound stays
+        // full volume because target == 1.0.
+        const int32_t target_q8 = (active_count > 0)
+                                ? (active_count << 8)
+                                : one_q8;
+        s_norm_q8 += ((target_q8 - s_norm_q8) * alpha) >> 8;
+        if (s_norm_q8 < one_q8) s_norm_q8 = one_q8;
+        acc_l = (acc_l << 8) / s_norm_q8;
+        acc_r = (acc_r << 8) / s_norm_q8;
+
         acc_l = (acc_l * master) / 255;
         acc_r = (acc_r * master) / 255;
 
+        // Belt-and-suspenders. With normalization above, only volume slider
+        // pushes past int16 range, and even that's bounded.
         dst[f * 2 + 0] = clamp_int16(acc_l);
         dst[f * 2 + 1] = clamp_int16(acc_r);
     }
