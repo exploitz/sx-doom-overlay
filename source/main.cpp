@@ -444,8 +444,19 @@ public:
 
         if (!g_doom_initialized || g_doom_failed) return;
 
-        // Footer-style row at y=647..720. Three buttons:
-        //   Save State  /  Load State  /  Quit
+        // Footer-style row at y=647..720. Three touch buttons:
+        //   ⬇ Save  /  ⬆ Load  /  ✕ Quit
+        // Unicode glyphs (not Switch button glyphs) so they don't falsely
+        // imply controller-button bindings — these are touch-only:
+        //   ⬇ U+2B07  "save down to disk"
+        //   ⬆ U+2B06  "load up from disk"
+        //   ✕ U+2715  "close / exit"
+        // Rendered with drawString in libtesla's bottomTextColor — same
+        // y baseline (693) and font (23 pt) as the WAD picker's footer.
+        static constexpr const char* kSaveLabel = "\xE2\xAC\x87 Save";   // ⬇ Save
+        static constexpr const char* kLoadLabel = "\xE2\xAC\x86 Load";   // ⬆ Load
+        static constexpr const char* kQuitLabel = "\xE2\x9C\x95 Quit";   // ✕ Quit
+
         auto draw_btn = [&](int x, int w, const char* label, bool pressed) {
             if (pressed) {
                 renderer->drawRoundedRect(static_cast<float>(x),
@@ -459,9 +470,9 @@ public:
             renderer->drawString(label, false, tx, kFooterTextY,
                                  kFooterFont, a(tsl::bottomTextColor));
         };
-        draw_btn(kBtnSaveX, kBtnSaveW, "Save State", m_btnPressed == 1);
-        draw_btn(kBtnLoadX, kBtnLoadW, "Load State", m_btnPressed == 2);
-        draw_btn(kBtnQuitX, kBtnQuitW, "Quit",       m_btnPressed == 3);
+        draw_btn(kBtnSaveX, kBtnSaveW, kSaveLabel, m_btnPressed == 1);
+        draw_btn(kBtnLoadX, kBtnLoadW, kLoadLabel, m_btnPressed == 2);
+        draw_btn(kBtnQuitX, kBtnQuitW, kQuitLabel, m_btnPressed == 3);
     }
 
     void layout(u16, u16, u16, u16) override {}
