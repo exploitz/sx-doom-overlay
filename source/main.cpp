@@ -67,8 +67,17 @@ constexpr int kScaledH    = 336;                           // 448*(3/4) — corr
 constexpr int kDoomOffsetX = 0;    // edge-to-edge horizontally
 constexpr int kDoomOffsetY = 108;  // matches UltraGB VP_Y: 11px below header (activeHeaderHeight=97)
 
-// WAD directory: /roms/doom/ (standard RetroArch/EmuDeck location on Switch SD).
+// WAD directories. We accept BOTH locations during the integration window so
+// neither Chase's existing setup nor Ethan's RetroArch-style setup breaks.
+//   - kWadDir          (primary): /roms/doom/ — RetroArch / EmuDeck convention
+//   - kWadDirLegacy:               /switch/sx-doom-overlay/ — original sx-doom-
+//                                  overlay layout, still used by users who
+//                                  installed before this branch landed.
+// scan_wads() walks both, dedupes by basename. Drop a WAD anywhere; picker
+// finds it. After we've all migrated to /roms/doom we can retire the legacy
+// path; until then this avoids "missing ROM" toasts on existing installs.
 constexpr const char* kWadDir        = "sdmc:/roms/doom";
+constexpr const char* kWadDirLegacy  = "sdmc:/switch/sx-doom-overlay";
 constexpr const char* kConfigDir     = "sdmc:/config/doom";
 constexpr const char* kTraceLog      = "sdmc:/config/doom/trace.log";
 constexpr const char* kConfigFile    = "sdmc:/config/doom/config.ini";
@@ -128,24 +137,37 @@ std::string friendly_wad_name(const std::string& fn) {
     return fn;
 }
 
-std::vector<WadEntry> scan_wads() {
-    std::vector<WadEntry> result;
-    mkdir(kWadDir, 0777);
-    DIR* d = opendir(kWadDir);
-    if (!d) return result;
+// Scan one directory for *.wad files, append to `result`, dedupe against
+// existing entries by case-insensitive basename so the legacy directory
+// doesn't shadow a primary-directory WAD with the same name.
+static void scan_wad_dir(const char* dir, std::vector<WadEntry>& result) {
+    if (!dir || !dir[0]) return;
+    mkdir(dir, 0777);
+    DIR* d = opendir(dir);
+    if (!d) return;
     struct dirent* entry;
     while ((entry = readdir(d)) != nullptr) {
         const char* name = entry->d_name;
         size_t len = std::strlen(name);
-        if (len > 4 && strcasecmp(name + len - 4, ".wad") == 0) {
-            WadEntry e;
-            e.filename     = name;
-            e.fullpath     = std::string(kWadDir) + "/" + name;
-            e.display_name = friendly_wad_name(e.filename);
-            result.push_back(std::move(e));
+        if (len <= 4 || strcasecmp(name + len - 4, ".wad") != 0) continue;
+        bool dupe = false;
+        for (const auto& e : result) {
+            if (strcasecmp(e.filename.c_str(), name) == 0) { dupe = true; break; }
         }
+        if (dupe) continue;
+        WadEntry e;
+        e.filename     = name;
+        e.fullpath     = std::string(dir) + "/" + name;
+        e.display_name = friendly_wad_name(e.filename);
+        result.push_back(std::move(e));
     }
     closedir(d);
+}
+
+std::vector<WadEntry> scan_wads() {
+    std::vector<WadEntry> result;
+    scan_wad_dir(kWadDir,       result);  // primary: /roms/doom
+    scan_wad_dir(kWadDirLegacy, result);  // fallback: /switch/sx-doom-overlay
     return result;
 }
 
