@@ -48,6 +48,15 @@
 // Trace logger lives in main.cpp.
 extern void doom_trace(const char* msg);
 
+// OPL fallback for songs that have no matching OGG file (e.g. CHEX, Freedoom,
+// custom WADs). When MusicRegister can't open an OGG, we hand the buffer to
+// music_opl_module and music_ogg_render forwards to OPL_LIBNX_Render until
+// the next song change. Keeps custom WADs from going silent.
+extern music_module_t music_opl_module;            // source/opl/i_oplmusic.c
+extern void           OPL_LIBNX_Render(int16_t* dst, size_t frames);
+static int  g_opl_active     = 0;   // 1 when current song is on OPL fallback
+static void* g_opl_handle    = NULL; // handle returned by OPL RegisterSong
+
 // -----------------------------------------------------------------------------
 // Configuration
 // -----------------------------------------------------------------------------
@@ -140,11 +149,24 @@ static struct {
 // Internal helpers
 // -----------------------------------------------------------------------------
 
+// Tear down any active OPL fallback song. Called before swapping songs so the
+// OPL player doesn't keep rendering a stale lump.
+static void close_opl_fallback_locked(void) {
+    if (!g_opl_active) return;
+    music_opl_module.StopSong();
+    if (g_opl_handle) {
+        music_opl_module.UnRegisterSong(g_opl_handle);
+        g_opl_handle = NULL;
+    }
+    g_opl_active = 0;
+}
+
 static void close_decoder_locked(void) {
     if (g_music.decoder) {
         stb_vorbis_close(g_music.decoder);
         g_music.decoder = NULL;
     }
+    close_opl_fallback_locked();
     g_music.playing = 0;
     g_music.paused  = 0;
     // Reset resampler so a new song doesn't pick up the previous song's
@@ -263,6 +285,14 @@ static boolean MusicInit(void) {
              "music_ogg: Init (alloc_buffer=%p, %d KB)",
              (void*)music_alloc_buffer, MUSIC_ALLOC_BYTES / 1024);
     doom_trace(tbuf);
+
+    // Bring up OPL too so it's ready as a per-song fallback when the OGG pack
+    // doesn't have the requested track (CHEX, Freedoom, custom WADs).
+    if (!music_opl_module.Init()) {
+        doom_trace("music_ogg: OPL fallback init FAILED — silent for missing OGGs");
+    } else {
+        doom_trace("music_ogg: OPL fallback ready");
+    }
     return true;
 }
 
@@ -270,6 +300,7 @@ static void MusicShutdown(void) {
     MUSIC_LOCK();
     close_decoder_locked();
     MUSIC_UNLOCK();
+    music_opl_module.Shutdown();
     doom_trace("music_ogg: Shutdown");
 }
 
@@ -278,19 +309,25 @@ static void MusicSetVolume(int volume) {
     if (volume > 127) volume = 127;
     MUSIC_LOCK();
     g_music.volume = volume;
+    int opl_active = g_opl_active;
     MUSIC_UNLOCK();
+    if (opl_active) music_opl_module.SetMusicVolume(volume);
 }
 
 static void MusicPause(void) {
     MUSIC_LOCK();
     g_music.paused = 1;
+    int opl_active = g_opl_active;
     MUSIC_UNLOCK();
+    if (opl_active) music_opl_module.PauseMusic();
 }
 
 static void MusicResume(void) {
     MUSIC_LOCK();
     g_music.paused = 0;
+    int opl_active = g_opl_active;
     MUSIC_UNLOCK();
+    if (opl_active) music_opl_module.ResumeMusic();
 }
 
 static void* MusicRegister(void* data, int len) {
@@ -303,18 +340,46 @@ static void* MusicRegister(void* data, int len) {
     int ok = open_song_for_buffer_locked(data);   // resolve lump → OGG path
     MUSIC_UNLOCK();
 
-    return ok ? (void*)0x1 : NULL;
+    if (ok) return (void*)0x1;
+
+    // OGG miss — try OPL fallback so the WAD still gets music.
+    void* h = music_opl_module.RegisterSong(data, len);
+    MUSIC_LOCK();
+    g_opl_active = (h != NULL) ? 1 : 0;
+    g_opl_handle = h;
+    MUSIC_UNLOCK();
+    snprintf(tbuf, sizeof(tbuf),
+             "music_ogg: OPL fallback %s handle=%p",
+             h ? "engaged" : "FAILED", h);
+    doom_trace(tbuf);
+    return h;  // chocolate-doom calls PlaySong with this same handle
 }
 
 static void MusicUnRegister(void* handle) {
-    (void)handle;
     MUSIC_LOCK();
-    close_decoder_locked();
+    int   opl_active = g_opl_active;
+    void* opl_h      = g_opl_handle;
+    close_decoder_locked();   // also tears down any OPL fallback
     MUSIC_UNLOCK();
+    (void)handle;             // close_decoder_locked already handled OPL
+    (void)opl_active;
+    (void)opl_h;
 }
 
 static void MusicPlay(void* handle, boolean looping) {
-    (void)handle;
+    MUSIC_LOCK();
+    int opl_active = g_opl_active;
+    MUSIC_UNLOCK();
+
+    if (opl_active) {
+        music_opl_module.PlaySong(handle, looping);
+        char tbuf[80];
+        snprintf(tbuf, sizeof(tbuf),
+                 "music_ogg: Play loop=%d (OPL fallback)", (int)looping);
+        doom_trace(tbuf);
+        return;
+    }
+
     MUSIC_LOCK();
     g_music.playing = (g_music.decoder != NULL);
     g_music.paused  = 0;
@@ -329,15 +394,19 @@ static void MusicPlay(void* handle, boolean looping) {
 
 static void MusicStop(void) {
     MUSIC_LOCK();
+    int opl_active = g_opl_active;
     g_music.playing = 0;
     if (g_music.decoder) stb_vorbis_seek_start(g_music.decoder);
     MUSIC_UNLOCK();
+    if (opl_active) music_opl_module.StopSong();
 }
 
 static boolean MusicIsPlaying(void) {
     MUSIC_LOCK();
+    int opl_active = g_opl_active;
     int p = g_music.playing && !g_music.paused;
     MUSIC_UNLOCK();
+    if (opl_active) return music_opl_module.MusicIsPlaying();
     return p ? true : false;
 }
 
@@ -424,6 +493,18 @@ static void decode_with_loop_locked(int16_t* out, int frames) {
 }
 
 void music_ogg_render(int16_t* dst, size_t frames) {
+    MUSIC_LOCK();
+    int opl_active = g_opl_active;
+    MUSIC_UNLOCK();
+
+    // OPL fallback path — current song has no OGG, drive the FM synth into
+    // the music bus directly. OPL_LIBNX_Render writes stereo int16 frames at
+    // the same MUSIC_OUTPUT_RATE the bus mixer expects.
+    if (opl_active) {
+        OPL_LIBNX_Render(dst, frames);
+        return;
+    }
+
     MUSIC_LOCK();
 
     g_music.render_call_count++;
