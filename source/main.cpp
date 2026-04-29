@@ -444,18 +444,30 @@ public:
 
         if (!g_doom_initialized || g_doom_failed) return;
 
-        // Footer-style row at y=647..720. Three touch buttons:
-        //   ⬇ Save  /  ⬆ Load  /  ✕ Quit
-        // Unicode glyphs (not Switch button glyphs) so they don't falsely
-        // imply controller-button bindings — these are touch-only:
-        //   ⬇ U+2B07  "save down to disk"
-        //   ⬆ U+2B06  "load up from disk"
-        //   ✕ U+2715  "close / exit"
-        // Rendered with drawString in libtesla's bottomTextColor — same
-        // y baseline (693) and font (23 pt) as the WAD picker's footer.
-        static constexpr const char* kSaveLabel = "\xE2\xAC\x87 Save";   // ⬇ Save
-        static constexpr const char* kLoadLabel = "\xE2\xAC\x86 Load";   // ⬆ Load
-        static constexpr const char* kQuitLabel = "\xE2\x9C\x95 Quit";   // ✕ Quit
+        // Footer-style row at y=647..720. Three buttons:
+        //   [LS] Save   [RS] Load   Quit
+        //
+        // The LS/RS glyphs (Switch private-use , ) are HONEST —
+        // L-stick click is bound to Save State and R-stick click is bound
+        // to Load State (see DoomGui::handleInput). User can press the
+        // stick OR tap the label. Quit is touch-only so it gets no glyph
+        // (no false controller-binding implication).
+        //
+        // Earlier attempt used Unicode arrows (⬇ ⬆ ✕) which the Switch
+        // system font doesn't include — they rendered as missing-glyph
+        // X marks. The \uE0XX private-use range IS in the Switch font.
+        //
+        // drawStringWithColoredSections puts the glyph in tsl::buttonColor
+        // and the label in tsl::bottomTextColor — same render as the
+        // WAD picker's footer "B Back  A OK".
+        // Plain text — no glyphs. Switch system font doesn't ship the
+        // Unicode arrow / dingbats blocks (⬇ ⬆ ✕ render as missing-char X)
+        // and the only renderable glyphs are controller-button glyphs in
+        // the \uE0XX private-use range. Binding A/B/X/Y to these touch
+        // actions just to justify a glyph would be misleading and weird.
+        static constexpr const char* kSaveLabel = "Save";
+        static constexpr const char* kLoadLabel = "Load";
+        static constexpr const char* kQuitLabel = "Quit";
 
         auto draw_btn = [&](int x, int w, const char* label, bool pressed) {
             if (pressed) {
