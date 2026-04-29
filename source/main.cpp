@@ -259,7 +259,11 @@ void try_init_engine(const char* iwad_path) {
     // (which we auto-confirm with 'y' from onTouch). Slot 0 is the canonical
     // "savestate" slot for our purposes; user can still use F2/F3-style
     // multi-slot saves through the Doom in-game menu (Plus button).
-    quickSaveSlot = 0;
+    // Map savestate to last slot (Doom menu "Save Slot 8" = internal 7) so
+    // the Save State button doesn't overwrite users' manual saves in slots
+    // 1-7. Vanilla Doom has 8 slots; users typically fill 1-3, last slot is
+    // safest as the auto-savestate target.
+    quickSaveSlot = 7;
 
     doom_blit::build_palette_lut_from_argb_struct(
         reinterpret_cast<const uint8_t*>(&colors[0]), g_palette_lut);
@@ -310,12 +314,15 @@ constexpr int kFooterTextY  = 693;                 // matches DoomOverlayFrame
 constexpr int kFooterFont   = 23;                  // matches DoomOverlayFrame
 
 // Three evenly-spaced touch zones across the 448 px width. ~10 px gaps.
-constexpr int kBtnSaveX = 30;
-constexpr int kBtnSaveW = 122;
-constexpr int kBtnLoadX = 162;
-constexpr int kBtnLoadW = 122;
-constexpr int kBtnQuitX = 294;
-constexpr int kBtnQuitW = 122;
+// Save/Load buttons widened to fit "QUICK SAVE" / "QUICK LOAD" labels at
+// 23 pt. Quit shrunk since "Quit" is short. Total layout fills the 448 px
+// frame edge-to-edge with small margins and gaps.
+constexpr int kBtnSaveX = 10;
+constexpr int kBtnSaveW = 152;
+constexpr int kBtnLoadX = 168;
+constexpr int kBtnLoadW = 152;
+constexpr int kBtnQuitX = 326;
+constexpr int kBtnQuitW = 112;
 
 // Helpers used by the Save/Load/Quit ListItem click listeners.
 namespace doom_actions {
@@ -465,8 +472,8 @@ public:
         // and the only renderable glyphs are controller-button glyphs in
         // the \uE0XX private-use range. Binding A/B/X/Y to these touch
         // actions just to justify a glyph would be misleading and weird.
-        static constexpr const char* kSaveLabel = "Save";
-        static constexpr const char* kLoadLabel = "Load";
+        static constexpr const char* kSaveLabel = "QUICK SAVE";
+        static constexpr const char* kLoadLabel = "QUICK LOAD";
         static constexpr const char* kQuitLabel = "Quit";
 
         auto draw_btn = [&](int x, int w, const char* label, bool pressed) {
