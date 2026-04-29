@@ -48,6 +48,24 @@
 // Trace logger lives in main.cpp.
 extern void doom_trace(const char* msg);
 
+// IWAD basename (lowercase, no extension) — set by main.cpp before engine
+// init via music_ogg_set_iwad. Used to scope music lookup to a per-WAD
+// subdirectory (e.g. /music/chex/d_e1m1.ogg vs /music/doom/d_e1m1.ogg) so
+// users can keep multiple OGG packs cached side-by-side and the runtime
+// picks the right one for whichever WAD is loaded.
+static char g_iwad_name[64] = "";
+
+void music_ogg_set_iwad(const char* iwad_basename) {
+    if (!iwad_basename) { g_iwad_name[0] = '\0'; return; }
+    size_t i = 0;
+    for (; i < sizeof(g_iwad_name) - 1 && iwad_basename[i]; ++i) {
+        char c = iwad_basename[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c + 32);  // lowercase
+        g_iwad_name[i] = c;
+    }
+    g_iwad_name[i] = '\0';
+}
+
 // OPL fallback for songs that have no matching OGG file (e.g. CHEX, Freedoom,
 // custom WADs). When MusicRegister can't open an OGG, we hand the buffer to
 // music_opl_module and music_ogg_render forwards to OPL_LIBNX_Render until
@@ -237,18 +255,35 @@ static const char* music_name_alias(const char* name) {
 }
 
 // Resolve the music buffer to a filename and open it. Tries, in order:
-//   <MUSIC_DIR>/d_<name>.ogg
-//   <MUSIC_DIR>/d_<alias>.ogg     (only for names with a known alias)
-//   <MUSIC_DIR>/test.ogg          (final smoke-test fallback)
+//   <MUSIC_DIR>/<iwad>/d_<name>.ogg     (per-WAD pack — preferred)
+//   <MUSIC_DIR>/<iwad>/d_<alias>.ogg
+//   <MUSIC_DIR>/d_<name>.ogg            (flat — legacy users + single-WAD)
+//   <MUSIC_DIR>/d_<alias>.ogg
+//   <MUSIC_DIR>/test.ogg                (final smoke-test fallback)
 // Caller must hold the music mutex.
 static int open_song_for_buffer_locked(const void* buf) {
     const char* name = lookup_music_name(buf);
     if (name && name[0]) {
         char path[256];
+        const char* alias = music_name_alias(name);
+
+        // Per-WAD subdir lookup first. Lets users keep e.g. /music/doom/ +
+        // /music/chex/ cached side-by-side and the right pack auto-selects.
+        if (g_iwad_name[0]) {
+            snprintf(path, sizeof(path), "%s/%s/d_%s.ogg",
+                     MUSIC_DIR, g_iwad_name, name);
+            if (try_open_path_locked(path)) return 1;
+            if (alias) {
+                snprintf(path, sizeof(path), "%s/%s/d_%s.ogg",
+                         MUSIC_DIR, g_iwad_name, alias);
+                if (try_open_path_locked(path)) return 1;
+            }
+        }
+
+        // Flat fallback — original layout, still valid for users who only
+        // play one WAD or who installed before the per-WAD layout existed.
         snprintf(path, sizeof(path), "%s/d_%s.ogg", MUSIC_DIR, name);
         if (try_open_path_locked(path)) return 1;
-
-        const char* alias = music_name_alias(name);
         if (alias) {
             snprintf(path, sizeof(path), "%s/d_%s.ogg", MUSIC_DIR, alias);
             if (try_open_path_locked(path)) return 1;

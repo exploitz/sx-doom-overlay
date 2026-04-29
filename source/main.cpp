@@ -41,6 +41,7 @@ extern "C" {
 #include "audio_glue.h"
 #include "doomgeneric.h"
 #include "i_video.h"  // extern colors[256], extern palette_changed
+#include "music_ogg.h"  // music_ogg_set_iwad — per-WAD music dir lookup
 
 extern jmp_buf g_doom_error_jmp;             // defined in doomgeneric_switch.c
 extern void doomgeneric_switch_reanchor_clock(void);
@@ -243,6 +244,25 @@ void try_init_engine(const char* iwad_path) {
     {
         char buf[256];
         std::snprintf(buf, sizeof(buf), "selected IWAD: %s", iwad_path);
+        doom_trace(buf);
+    }
+
+    // Extract IWAD stem (e.g. "/path/CHEX.WAD" → "chex") and hand it to the
+    // music backend so per-WAD OGG packs (sdmc:/.../music/chex/d_e1m1.ogg)
+    // are picked up automatically. music_ogg_set_iwad lowercases internally;
+    // we just need to strip the dir + extension here.
+    {
+        const char* slash = std::strrchr(iwad_path, '/');
+        const char* base  = slash ? slash + 1 : iwad_path;
+        char stem[64];
+        size_t i = 0;
+        for (; base[i] && base[i] != '.' && i < sizeof(stem) - 1; ++i) {
+            stem[i] = base[i];
+        }
+        stem[i] = '\0';
+        music_ogg_set_iwad(stem);
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "music_ogg: iwad scope = %s", stem);
         doom_trace(buf);
     }
 

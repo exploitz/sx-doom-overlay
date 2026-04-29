@@ -28,6 +28,12 @@ extern "C" {
 // Called from the audio submit thread, replacing OPL_LIBNX_Render.
 void music_ogg_render(int16_t* dst, size_t frames);
 
+// Tell the music backend which IWAD is loaded so it can scope music lookup
+// to /music/<iwad>/d_*.ogg (per-WAD packs cached side-by-side). Pass the
+// stem only — no path, no .wad extension. Case-insensitive (we lowercase).
+// Pass NULL or "" to disable per-WAD lookup and use the flat /music/ path.
+void music_ogg_set_iwad(const char* iwad_basename);
+
 #ifdef __cplusplus
 }
 #endif
