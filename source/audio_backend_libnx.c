@@ -176,9 +176,15 @@ static void submit_thread_main(void* arg) {
             doom_trace(tbuf);
         }
 
+        // Headroom budget: SFX 160/256 + Music 96/256 = 256/256 = unity.
+        // Coincident peak SFX + peak music can no longer overflow int16, so
+        // the saturator below is now belt-and-suspenders, not a tone-shaping
+        // tool. Earlier 160+160 mix peaked at 1.25x and hard-clipped into
+        // bass content (SC-55 OGG has real low-end energy; OPL FM doesn't),
+        // which is what made bass "sound doo-doo" on level music.
         const int total_samples = FRAMES_PER_BUF * AUDIO_BACKEND_CHANNELS;
-        const int32_t SFX_SCALE   = 160;   // 62%
-        const int32_t MUSIC_SCALE = 160;   // 62%
+        const int32_t SFX_SCALE   = 160;   // 62%, unchanged — gunshots stay punchy
+        const int32_t MUSIC_SCALE =  96;   // 37.5%, was 160
         for (int i = 0; i < total_samples; ++i) {
             int32_t s = ((int32_t)out[i] * SFX_SCALE
                        + (int32_t)music_scratch[i] * MUSIC_SCALE) >> 8;
