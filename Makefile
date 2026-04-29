@@ -31,7 +31,10 @@ include $(DEVKITPRO)/libnx/switch_rules
 # -----------------------------------------------------------------------------
 APP_TITLE   := Doom Overlay
 APP_AUTHOR  := chase
-APP_VERSION := 0.0.1-bootstrap
+GIT_BRANCH  := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
+GIT_HASH    := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit)
+GIT_DIRTY   := $(shell git diff --quiet 2>/dev/null || echo +)
+APP_VERSION := $(GIT_BRANCH)@$(GIT_HASH)$(GIT_DIRTY)
 TARGET      := sx-doom-overlay
 BUILD       := build
 SOURCES     := source source/opl
@@ -80,7 +83,8 @@ CFLAGS  += $(INCLUDE) -D__SWITCH__
 #                              the rest of the user's overlay collection.
 CFLAGS  += -DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 \
            -DUSE_EXCEPTION_WRAP=1 -DNORMALUNIX -DLINUX \
-           -DSWITCH_SOUND -DUSING_WIDGET_DIRECTIVE
+           -DSWITCH_SOUND -DUSING_WIDGET_DIRECTIVE \
+           -DAPP_VERSION=\"$(APP_VERSION)\"
 
 # Doomgeneric warnings we accept (pre-existing in upstream, not regressions
 # we want to fail the build on)
