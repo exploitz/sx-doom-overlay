@@ -29,13 +29,19 @@ include $(DEVKITPRO)/libnx/switch_rules
 # -----------------------------------------------------------------------------
 # Project metadata (used by switch_rules for .nacp generation)
 # -----------------------------------------------------------------------------
-APP_TITLE   := Doom Overlay
 APP_AUTHOR  := chase
 APP_VERSION := 0.1.0
 GIT_BRANCH  := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
 GIT_HASH    := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit)
 GIT_DIRTY   := $(shell git diff --quiet 2>/dev/null || echo +)
 BUILD_ID    := $(GIT_BRANCH)@$(GIT_HASH)$(GIT_DIRTY)
+# Title shown in the libtesla overlay picker. Includes the branch so non-main
+# builds (OGG, feature branches, etc) are visually distinct in the launcher.
+ifeq ($(GIT_BRANCH),main)
+APP_TITLE   := Doom Overlay
+else
+APP_TITLE   := Doom ($(GIT_BRANCH))
+endif
 TARGET      := sx-doom-overlay
 BUILD       := build
 SOURCES     := source source/opl
