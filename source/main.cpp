@@ -29,6 +29,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <strings.h>
+#include <malloc.h>     // mallinfo for heap counter
 #include <string>
 #include <vector>
 
@@ -66,6 +67,27 @@ constexpr int kScaledW    = 448;                           // fill full FB width
 constexpr int kScaledH    = 336;                           // 448*(3/4) — correct 4:3 with Doom PAR
 constexpr int kDoomOffsetX = 0;    // edge-to-edge horizontally
 constexpr int kDoomOffsetY = 108;  // matches UltraGB VP_Y: 11px below header (activeHeaderHeight=97)
+
+// Bottom-of-overlay UI: heap counter + Save/Load/Quit buttons.
+// Game viewport ends at y = 108 + 336 = 444. Footer is hidden during gameplay
+// (DoomGui sets m_footerHidden=true). Free space below: y = 444..720 (276 px).
+//
+//   y = 470: heap counter text (single line, small font)
+//   y = 540: button row, 60 px tall, three buttons evenly spaced
+//
+// Buttons are touchable rectangles drawn via renderer->drawRoundedRect with
+// libtesla-style click highlight. Save → push KEY_F2 (opens Doom save menu),
+// Load → push KEY_F3 (load menu), Quit → tsl::Overlay::close().
+constexpr int kBtnY      = 540;
+constexpr int kBtnH      = 60;
+constexpr int kBtnW      = 120;
+constexpr int kBtnSaveX  = 30;
+constexpr int kBtnLoadX  = 164;
+constexpr int kBtnQuitX  = 298;
+
+// Doom F-keys (chocolate-doom doomkeys.h).
+constexpr unsigned char kDoomKeyF2 = 0x80 + 0x3c;  // save game
+constexpr unsigned char kDoomKeyF3 = 0x80 + 0x3d;  // load game
 
 // WAD directories. We accept BOTH locations during the integration window so
 // neither legacy installs nor RetroArch-style new installs break.
@@ -319,13 +341,101 @@ public:
                 }
             }
         }
+
+        // ── Heap counter (sampled once per second) ───────────────────────
+        {
+            static u64 heap_last_sample_ns = 0;
+            static char heap_label[80] = "heap: …";
+            const u64 now_ns = armTicksToNs(armGetSystemTick());
+            if (now_ns - heap_last_sample_ns > 1'000'000'000ULL) {
+                heap_last_sample_ns = now_ns;
+                struct mallinfo mi = mallinfo();
+                const size_t free_kb = static_cast<size_t>(mi.fordblks) / 1024;
+                const size_t used_kb = static_cast<size_t>(mi.uordblks) / 1024;
+                std::snprintf(heap_label, sizeof(heap_label),
+                              "heap: %zu KB used  /  %zu KB free",
+                              used_kb, free_kb);
+            }
+            renderer->drawString(heap_label, false, 30, 470, 14,
+                                 tsl::Color(0xCFFF));
+        }
+
+        // ── Action buttons: Save (F2) / Load (F3) / Quit (close overlay) ─
+        auto draw_btn = [&](int x, const char* label, bool pressed) {
+            const tsl::Color bg   = pressed
+                ? a(tsl::clickColor)
+                : tsl::Color(0x4448);
+            renderer->drawRoundedRect(static_cast<float>(x),
+                                      static_cast<float>(kBtnY),
+                                      static_cast<float>(kBtnW),
+                                      static_cast<float>(kBtnH),
+                                      8.f, bg);
+            const auto td = renderer->getTextDimensions(label, false, 20);
+            const int tx = x + (kBtnW - static_cast<int>(td.first)) / 2;
+            const int ty = kBtnY + (kBtnH + 14) / 2;
+            renderer->drawString(label, false, tx, ty, 20,
+                                 tsl::Color(0xFFFF));
+        };
+        draw_btn(kBtnSaveX, "Save", m_btnPressed == 1);
+        draw_btn(kBtnLoadX, "Load", m_btnPressed == 2);
+        draw_btn(kBtnQuitX, "Quit", m_btnPressed == 3);
     }
 
     void layout(u16, u16, u16, u16) override {}
+
     bool handleInput(u64, u64, const HidTouchState&,
                      HidAnalogStickState, HidAnalogStickState) override {
         return false;
     }
+
+    bool onTouch(tsl::elm::TouchEvent event,
+                 s32 currX, s32 currY,
+                 s32 prevX, s32 prevY,
+                 s32 initialX, s32 initialY) override {
+        (void)prevX; (void)prevY; (void)initialX; (void)initialY;
+        auto inBtn = [&](int x) {
+            return currX >= x && currX < x + kBtnW &&
+                   currY >= kBtnY && currY < kBtnY + kBtnH;
+        };
+        // Press: latch which button is being held for visual highlight.
+        if (event == tsl::elm::TouchEvent::Touch) {
+            if      (inBtn(kBtnSaveX)) { m_btnPressed = 1; return true; }
+            else if (inBtn(kBtnLoadX)) { m_btnPressed = 2; return true; }
+            else if (inBtn(kBtnQuitX)) { m_btnPressed = 3; return true; }
+        }
+        // Release: only fire the action if release happened in the same
+        // button that was originally pressed (drag-out-then-release cancels).
+        if (event == tsl::elm::TouchEvent::Release) {
+            const int hit = m_btnPressed;
+            m_btnPressed = 0;
+            if (hit == 1 && inBtn(kBtnSaveX)) {
+                doomgeneric_switch_push_key(1, kDoomKeyF2);
+                doomgeneric_switch_push_key(0, kDoomKeyF2);
+                return true;
+            }
+            if (hit == 2 && inBtn(kBtnLoadX)) {
+                doomgeneric_switch_push_key(1, kDoomKeyF3);
+                doomgeneric_switch_push_key(0, kDoomKeyF3);
+                return true;
+            }
+            if (hit == 3 && inBtn(kBtnQuitX)) {
+                // CRITICAL: set launchComboHasTriggered before close. Without
+                // this flag, libtesla's close path runs the "exit feedback
+                // sound" branch (tesla.hpp:13867) which conflicts with our
+                // audio backend teardown and crashes Atmosphère. Combo close
+                // sets this; the original Quit button on sx-doom-overlay
+                // didn't, which is why combo worked but Quit was crashy.
+                doom_trace("Quit button — closing overlay");
+                launchComboHasTriggered.store(true, std::memory_order_release);
+                tsl::Overlay::get()->close();
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    int m_btnPressed = 0;  // 0=none, 1=Save, 2=Load, 3=Quit
 };
 
 
