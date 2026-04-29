@@ -42,15 +42,15 @@ extern "C" {
 #include "doomgeneric.h"
 #include "i_video.h"  // extern colors[256], extern palette_changed
 
-extern jmp_buf g_doom_error_jmp;             // defined in doomgeneric_nx.c
+extern jmp_buf g_doom_error_jmp;             // defined in doomgeneric_switch.c
 extern void doomgeneric_switch_reanchor_clock(void);
 
 void doomgeneric_Create(int argc, char** argv);
 void doomgeneric_Tick(void);
 
-extern int gamestate;
-extern int gametic;
-extern int demosequence;
+// Doom engine internals we read for the heap counter / savestate semantics.
+extern int Z_FreeMemory(void);    // z_zone.c — free bytes in Doom zone
+extern int quickSaveSlot;         // m_menu.c — pre-set so F6 silently saves
 }
 
 namespace {
@@ -86,8 +86,15 @@ constexpr int kBtnLoadX  = 164;
 constexpr int kBtnQuitX  = 298;
 
 // Doom F-keys (chocolate-doom doomkeys.h).
-constexpr unsigned char kDoomKeyF2 = 0x80 + 0x3c;  // save game
-constexpr unsigned char kDoomKeyF3 = 0x80 + 0x3d;  // load game
+//   F6 = quicksave to quickSaveSlot (silently overwrites if slot is set).
+//   F9 = quickload from quickSaveSlot.
+// Both show a "Y/N over your save?" prompt; we auto-confirm by pushing 'y'
+// immediately after the F-key — the engine processes the keypress queue
+// serially so 'y' arrives during the prompt and dismisses it. Net effect:
+// emulator-style savestate semantics on a single button press.
+constexpr unsigned char kDoomKeyF6 = 0x80 + 0x40;  // quicksave
+constexpr unsigned char kDoomKeyF9 = 0x80 + 0x43;  // quickload
+constexpr unsigned char kDoomKeyY  = 'y';          // auto-confirm prompts
 
 // WAD directories. We accept BOTH locations during the integration window so
 // neither legacy installs nor RetroArch-style new installs break.
@@ -263,6 +270,13 @@ void try_init_engine(const char* iwad_path) {
     doom_trace("doomgeneric_Create returned OK");
     g_doom_initialized = true;
 
+    // Pre-set quickSaveSlot so the Save button (F6) skips the "set a slot
+    // first" prompt and goes straight to the "Y/N over slot 0?" dialog
+    // (which we auto-confirm with 'y' from onTouch). Slot 0 is the canonical
+    // "savestate" slot for our purposes; user can still use F2/F3-style
+    // multi-slot saves through the Doom in-game menu (Plus button).
+    quickSaveSlot = 0;
+
     doom_blit::build_palette_lut_from_argb_struct(
         reinterpret_cast<const uint8_t*>(&colors[0]), g_palette_lut);
     palette_changed = false;
@@ -342,43 +356,58 @@ public:
             }
         }
 
-        // ── Heap counter (sampled once per second) ───────────────────────
+        // ── Memory counter (sampled once per second) ─────────────────────
+        // Two values matter:
+        //   - newlib heap: changes when our overlay code allocates/frees
+        //     (mostly static after init since Doom uses its own zone)
+        //   - Doom Z_Malloc zone: 4 MiB pre-allocated chunk where the engine
+        //     actually does most allocs during gameplay (lump cache, sound
+        //     cache, MIDI arena). This is what visibly fluctuates.
         {
-            static u64 heap_last_sample_ns = 0;
-            static char heap_label[80] = "heap: …";
+            static u64 mem_last_sample_ns = 0;
+            static char mem_label[112] = "mem: …";
             const u64 now_ns = armTicksToNs(armGetSystemTick());
-            if (now_ns - heap_last_sample_ns > 1'000'000'000ULL) {
-                heap_last_sample_ns = now_ns;
-                struct mallinfo mi = mallinfo();
-                const size_t free_kb = static_cast<size_t>(mi.fordblks) / 1024;
-                const size_t used_kb = static_cast<size_t>(mi.uordblks) / 1024;
-                std::snprintf(heap_label, sizeof(heap_label),
-                              "heap: %zu KB used  /  %zu KB free",
-                              used_kb, free_kb);
+            if (now_ns - mem_last_sample_ns > 1'000'000'000ULL) {
+                mem_last_sample_ns = now_ns;
+                const struct mallinfo mi = mallinfo();
+                const size_t newlib_used_kb = static_cast<size_t>(mi.uordblks) / 1024;
+                const size_t newlib_free_kb = static_cast<size_t>(mi.fordblks) / 1024;
+                const size_t zone_free_kb   =
+                    g_doom_initialized
+                    ? static_cast<size_t>(Z_FreeMemory()) / 1024
+                    : 0;
+                std::snprintf(mem_label, sizeof(mem_label),
+                              "newlib: %zuk used / %zuk free   doom zone: %zuk free",
+                              newlib_used_kb, newlib_free_kb, zone_free_kb);
             }
-            renderer->drawString(heap_label, false, 30, 470, 14,
+            renderer->drawString(mem_label, false, 30, 470, 14,
                                  tsl::Color(0xCFFF));
         }
 
-        // ── Action buttons: Save (F2) / Load (F3) / Quit (close overlay) ─
+        // ── Action buttons (libtesla footer style) ───────────────────────
+        // Match the visual language of DoomOverlayFrame's footer:
+        //   - idle:   text only, no background
+        //   - touch:  rounded-rect highlight using a(tsl::clickColor),
+        //             corner radius 12.0f
+        //   - font:   23 pt, tsl::bottomTextColor
+        // No controller-glyph prefix because these buttons are touch-only —
+        // the bumper L/R bindings handle the controller path separately.
         auto draw_btn = [&](int x, const char* label, bool pressed) {
-            const tsl::Color bg   = pressed
-                ? a(tsl::clickColor)
-                : tsl::Color(0x4448);
-            renderer->drawRoundedRect(static_cast<float>(x),
-                                      static_cast<float>(kBtnY),
-                                      static_cast<float>(kBtnW),
-                                      static_cast<float>(kBtnH),
-                                      8.f, bg);
-            const auto td = renderer->getTextDimensions(label, false, 20);
+            if (pressed) {
+                renderer->drawRoundedRect(static_cast<float>(x),
+                                          static_cast<float>(kBtnY),
+                                          static_cast<float>(kBtnW),
+                                          static_cast<float>(kBtnH),
+                                          12.f, a(tsl::clickColor));
+            }
+            const auto td = renderer->getTextDimensions(label, false, 23);
             const int tx = x + (kBtnW - static_cast<int>(td.first)) / 2;
-            const int ty = kBtnY + (kBtnH + 14) / 2;
-            renderer->drawString(label, false, tx, ty, 20,
-                                 tsl::Color(0xFFFF));
+            const int ty = kBtnY + (kBtnH + 18) / 2;
+            renderer->drawString(label, false, tx, ty, 23, a(tsl::bottomTextColor));
         };
-        draw_btn(kBtnSaveX, "Save", m_btnPressed == 1);
-        draw_btn(kBtnLoadX, "Load", m_btnPressed == 2);
-        draw_btn(kBtnQuitX, "Quit", m_btnPressed == 3);
+        draw_btn(kBtnSaveX, "Save State", m_btnPressed == 1);
+        draw_btn(kBtnLoadX, "Load State", m_btnPressed == 2);
+        draw_btn(kBtnQuitX, "Quit",       m_btnPressed == 3);
     }
 
     void layout(u16, u16, u16, u16) override {}
@@ -409,13 +438,26 @@ public:
             const int hit = m_btnPressed;
             m_btnPressed = 0;
             if (hit == 1 && inBtn(kBtnSaveX)) {
-                doomgeneric_switch_push_key(1, kDoomKeyF2);
-                doomgeneric_switch_push_key(0, kDoomKeyF2);
+                // Savestate-style: F6 (quicksave to quickSaveSlot=0) + 'y'
+                // to auto-confirm the "Quicksave over slot 0?" prompt. The
+                // engine processes the queue serially so 'y' arrives during
+                // the prompt and dismisses it. Per-WAD save dir comes from
+                // patches/0006 — slot 0 in Doom doesn't collide with slot 0
+                // in Doom 2.
+                doom_trace("Save State: F6 + y");
+                doomgeneric_switch_push_key(1, kDoomKeyF6);
+                doomgeneric_switch_push_key(0, kDoomKeyF6);
+                doomgeneric_switch_push_key(1, kDoomKeyY);
+                doomgeneric_switch_push_key(0, kDoomKeyY);
                 return true;
             }
             if (hit == 2 && inBtn(kBtnLoadX)) {
-                doomgeneric_switch_push_key(1, kDoomKeyF3);
-                doomgeneric_switch_push_key(0, kDoomKeyF3);
+                // F9 + 'y' — quickload from slot 0, auto-confirm prompt.
+                doom_trace("Load State: F9 + y");
+                doomgeneric_switch_push_key(1, kDoomKeyF9);
+                doomgeneric_switch_push_key(0, kDoomKeyF9);
+                doomgeneric_switch_push_key(1, kDoomKeyY);
+                doomgeneric_switch_push_key(0, kDoomKeyY);
                 return true;
             }
             if (hit == 3 && inBtn(kBtnQuitX)) {
