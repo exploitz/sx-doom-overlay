@@ -1,33 +1,37 @@
-// sx-doom-overlay — Doom inside an Ultrahand overlay
+// DOOM — Doom inside an Ultrahand overlay
 //
-// Task 7 (engine integration) — minimal viable: doomgeneric runs inside
-// libtesla's update()/draw() callbacks, attract demo plays, no input or
-// audio yet. Tasks 8 (input mapping) and 9 (audio) build on this.
+// Adapted from sx-doom-overlay (Chase Gober), which is the confirmed-working
+// reference build. Architecture is identical:
+//   - Single-threaded: engine tick + render in libtesla update()/draw().
+//   - doomgeneric_Create() called lazily in first update() — after framebuffer ready.
+//   - doomgeneric_Tick() called in 35 Hz accumulator in update().
+//   - DoomElement::draw() blits DG_ScreenBuffer → libtesla setPixel().
+//   - Palette LUT rebuilt from colors[256] on palette_changed each frame.
+//   - Audio: Task 9 (stub in audio_backend_libnx.c returns INIT_FAILED).
 //
-// Threading: single-threaded (engine + render in libtesla callbacks).
-// Audio thread will be added in Task 9.
+// CRITICAL: libtesla's framebuffer is block-linear (Tegra GPU swizzled), NOT
+// flat row-major. Writing to getCurrentFramebuffer() directly scribbles memory
+// over libtesla state → Atmosphère crash. Use renderer->setPixel() which routes
+// through the correct swizzle. Direct FB optimization is a future task.
 //
 // Licensed under GPLv2.
 
 #define NDEBUG
 #define TESLA_INIT_IMPL
+#include <ultra.hpp>
 #include <tesla.hpp>
+#include "elm_ultradoomframe.hpp"
 
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
-#include <ctime>
-#include <malloc.h>
 #include <setjmp.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <strings.h>
+#include <malloc.h>     // mallinfo for heap counter
 #include <string>
 #include <vector>
-
-// Reverted: __nx_main_thread_stack_size override was actually SHRINKING the
-// libnx default 1 MiB to 256 KiB, not growing it — could induce stack
-// overflow in Doom's BSP recursion. Trust libnx's default.
 
 #include "blit.hpp"
 #include "input_map.hpp"
@@ -36,155 +40,155 @@ extern "C" {
 #include "audio_backend.h"
 #include "audio_glue.h"
 #include "doomgeneric.h"
-// NB: NOT including doomkeys.h here — its KEY_MINUS = 0x2d (keyboard scancode)
-// collides with libultrahand's KEY_MINUS = HidNpadButton_Minus (Switch button).
-// doomgeneric_switch.c is the only TU that needs the doom keycodes.
 #include "i_video.h"  // extern colors[256], extern palette_changed
 
 extern jmp_buf g_doom_error_jmp;             // defined in doomgeneric_switch.c
 extern void doomgeneric_switch_reanchor_clock(void);
 
-// Engine entry points.
 void doomgeneric_Create(int argc, char** argv);
 void doomgeneric_Tick(void);
 
-// Diagnostic externs for title/demo crash investigation (Task 7a).
-// gamestate enum: 0=GS_LEVEL, 1=GS_INTERMISSION, 2=GS_FINALE, 3=GS_DEMOSCREEN
-extern int gamestate;        // gamestate_t backed by int
-extern int gametic;
-extern int demosequence;     // only meaningful when gamestate==GS_DEMOSCREEN
+// Doom engine internals we read for the heap counter / savestate semantics.
+extern int Z_FreeMemory(void);    // z_zone.c — free bytes in Doom zone
+extern int quickSaveSlot;         // m_menu.c — pre-set so F6 silently saves
 }
 
 namespace {
 
-constexpr const char* kAppTitle      = "ULTRAWADS";  // overlay brand — UltraGB-style naming + WADS
-constexpr const char* kAppVersion    = "0.1";
+// libtesla's framebuffer is 448x720 with hardcoded block-linear swizzle for
+// offsetWidthVar=112 (448/4). Pixels past x=447 land at wrong addresses.
+// Stay at 448 wide. Doom source is 320x200 with non-square 5:6 pixels, so
+// correct 4:3 display = 448x336. Nearest-neighbor scale at 35 Hz is fine.
+constexpr int kFbWidth    = 448;
+constexpr int kFbHeight   = 720;
+constexpr int kDoomW      = 320;
+constexpr int kDoomH      = 200;
+constexpr int kScaledW    = 448;                           // fill full FB width
+constexpr int kScaledH    = 336;                           // 448*(3/4) — correct 4:3 with Doom PAR
+constexpr int kDoomOffsetX = 0;    // edge-to-edge horizontally
+constexpr int kDoomOffsetY = 108;  // matches UltraGB VP_Y: 11px below header (activeHeaderHeight=97)
 
-// libtesla's default framebuffer is 448×720 with a hardcoded block-linear
-// swizzle (tesla.hpp:2700: "Pure functions of the fixed 448×720 /
-// offsetWidthVar=112 geometry"). Setting cfg::FramebufferWidth/Height to
-// non-default values does NOT recompute the swizzle constants — pixels
-// past x=447 land at wrong memory addresses and corrupt libtesla state.
-// We therefore stay at the default and draw Doom CENTERED in that region.
-constexpr int         kFbWidth       = 448;
-constexpr int         kFbHeight      = 720;
-constexpr int         kDoomW         = 320;
-constexpr int         kDoomH         = 200;
+// Doom F-keys (chocolate-doom doomkeys.h).
+//   F6 = quicksave to quickSaveSlot (silently overwrites if slot is set).
+//   F9 = quickload from quickSaveSlot.
+// Both show a "Y/N over your save?" prompt; we auto-confirm with KEY_ENTER
+// because m_controls.c:157 sets key_menu_confirm = 13 (ENTER), not 'y',
+// per the sx-doom-overlay-local patch. The engine processes the keypress
+// queue serially so ENTER arrives during the prompt and dismisses it.
+// Net effect: emulator-style savestate semantics on a single touch.
+constexpr unsigned char kDoomKeyF6     = 0x80 + 0x40;  // quicksave
+constexpr unsigned char kDoomKeyF9     = 0x80 + 0x43;  // quickload
+constexpr unsigned char kDoomKeyEnter  = 13;           // auto-confirm prompts
 
-// Display viewport: 1.4× nearest-neighbor stretch from 320×200 → 448×280.
-// Full framebuffer width (the swizzle is hardcoded for 448 wide so we can use
-// every column safely). 1.4× chosen so the picture is meaningfully bigger than
-// 1× without exceeding what the per-pixel blit can do at 60 Hz on Tegra X1
-// (448×280 = 125k pixels/frame ≈ 7.5 M setPixel ops/sec — within budget).
-constexpr int         kDisplayW      = 448;
-constexpr int         kDisplayH      = 280;
-constexpr int         kDisplayX      = 0;
-constexpr int         kDisplayY      = (kFbHeight - kDisplayH) / 2;  // 220
-// WAD location moved from /switch/.overlays/doom/ (wrong — .overlays is for
-// .ovl binaries only, per Switch homebrew convention) to /switch/sx-doom-overlay/
-// (per-app data dir). User drops *.wad files here; picker enumerates them.
-constexpr const char* kWadDir        = "sdmc:/switch/sx-doom-overlay";
-constexpr const char* kZoneSizeMb    = "4";
+// WAD directories. We accept BOTH locations during the integration window so
+// neither legacy installs nor RetroArch-style new installs break.
+//   - kWadDir          (primary): /roms/doom/   — RetroArch / EmuDeck convention
+//   - kWadDirLegacy:               /switch/sx-doom-overlay/ — original sx-doom-
+//                                  overlay layout, still used by users who
+//                                  installed before this branch landed.
+// scan_wads() walks both, dedupes by basename. After everyone's migrated to
+// /roms/doom we can retire the legacy path.
+constexpr const char* kWadDir        = "sdmc:/roms/doom";
+constexpr const char* kWadDirLegacy  = "sdmc:/switch/sx-doom-overlay";
+constexpr const char* kConfigDir     = "sdmc:/config/doom";
+constexpr const char* kTraceLog      = "sdmc:/config/doom/trace.log";
+constexpr const char* kConfigFile    = "sdmc:/config/doom/config.ini";
+constexpr const char* kConfigSection = "doom";
 
-// Engine state — protected by the libtesla single-thread invariant.
+bool g_lcd_grid = false;
+
+// stdio_stubs.c overrides fprintf/fputs to no-ops (suppresses 220+ engine
+// prints that crash on NULL stdout). libultrahand's setIniFile uses both, so
+// any save via ult::setIniFileValue writes an empty file silently.
+// Use fwrite/fread directly — neither is overridden by stdio_stubs.c.
+static void save_lcd_grid() {
+    mkdir("sdmc:/config", 0777);
+    mkdir(kConfigDir, 0777);
+    FILE* f = std::fopen(kConfigFile, "w");
+    if (!f) return;
+    const char* line = g_lcd_grid ? "[doom]\nlcd_grid=1\n" : "[doom]\nlcd_grid=0\n";
+    std::fwrite(line, 1, std::strlen(line), f);
+    std::fclose(f);
+}
+static void load_config() {
+    FILE* f = std::fopen(kConfigFile, "r");
+    if (!f) return;
+    char buf[64];
+    const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    buf[n] = '\0';
+    if      (std::strstr(buf, "lcd_grid=1")) g_lcd_grid = true;
+    else if (std::strstr(buf, "lcd_grid=0")) g_lcd_grid = false;
+}
+
+// Engine state — protected by libtesla single-thread invariant.
 bool             g_doom_initialized = false;
 bool             g_doom_failed      = false;
 char             g_doom_error_msg[128] = {0};
 audio_backend_t* g_audio_backend    = nullptr;
 doom_blit::PaletteLut g_palette_lut;
 
-// Friendly name of the loaded WAD — set by DoomGui ctor, drawn under the
-// viewport by DoomElement. Global because Element doesn't get constructor args
-// in our simple architecture.
-std::string g_wad_display_name;
-
-// System status — refreshed every ~60 frames (≈1 sec) by DoomElement::draw.
-// psmInitialize() in DoomOverlay::initServices; psmExit() in exitServices.
-struct SysStatus {
-    char     time_str[16]    = "--:--";   // HH:MM:SS
-    int      battery_pct     = -1;        // -1 = psm not available
-    unsigned heap_used_kb    = 0;
-    unsigned heap_total_kb   = 0;
-    bool     psm_ready       = false;
-} g_sys_status;
-
-void refresh_sys_status() {
-    // Time
-    time_t t = std::time(nullptr);
-    struct tm tm_buf;
-    if (localtime_r(&t, &tm_buf) != nullptr) {
-        std::strftime(g_sys_status.time_str, sizeof(g_sys_status.time_str), "%H:%M:%S", &tm_buf);
-    }
-    // Battery (psm)
-    if (g_sys_status.psm_ready) {
-        u32 pct = 0;
-        if (R_SUCCEEDED(psmGetBatteryChargePercentage(&pct))) {
-            g_sys_status.battery_pct = static_cast<int>(pct);
-        }
-    }
-    // Heap (mallinfo) — uordblks = currently allocated, fordblks = free in arena
-    struct mallinfo mi = mallinfo();
-    g_sys_status.heap_used_kb  = static_cast<unsigned>(mi.uordblks) / 1024;
-    g_sys_status.heap_total_kb = static_cast<unsigned>(mi.uordblks + mi.fordblks) / 1024;
-}
-
-// WAD discovery + friendly-name table.
 struct WadEntry {
-    std::string filename;      // "doom.wad"
-    std::string fullpath;      // "sdmc:/switch/sx-doom-overlay/doom.wad"
-    std::string display_name;  // "Doom (Ultimate)"
+    std::string filename;
+    std::string fullpath;
+    std::string display_name;
 };
 
 std::string friendly_wad_name(const std::string& fn) {
-    // Lowercase compare so e.g. DOOM.WAD and doom.wad both match.
     auto eq = [&](const char* p) { return strcasecmp(fn.c_str(), p) == 0; };
-    if (eq("doom.wad"))       return "Doom (Ultimate)";
-    if (eq("doom2.wad"))      return "Doom II";
-    if (eq("doom1.wad"))      return "Doom (shareware)";
-    if (eq("tnt.wad"))        return "TNT: Evilution";
-    if (eq("plutonia.wad"))   return "The Plutonia Experiment";
-    if (eq("freedoom1.wad"))  return "Freedoom Phase 1";
-    if (eq("freedoom2.wad"))  return "Freedoom Phase 2";
-    if (eq("chex.wad"))       return "Chex Quest";
-    if (eq("chex3.wad"))      return "Chex Quest 3";
-    if (eq("hacx.wad"))       return "HacX";
-    return fn;  // unknown — show the filename
+    if (eq("doom.wad"))      return "Doom (Ultimate)";
+    if (eq("doom2.wad"))     return "Doom II";
+    if (eq("doom1.wad"))     return "Doom (shareware)";
+    if (eq("tnt.wad"))       return "TNT: Evilution";
+    if (eq("plutonia.wad"))  return "The Plutonia Experiment";
+    if (eq("freedoom1.wad")) return "Freedoom Phase 1";
+    if (eq("freedoom2.wad")) return "Freedoom Phase 2";
+    if (eq("chex.wad"))      return "Chex Quest";
+    if (eq("chex3.wad"))     return "Chex Quest 3";
+    if (eq("hacx.wad"))      return "HacX";
+    return fn;
 }
 
-std::vector<WadEntry> scan_wads() {
-    std::vector<WadEntry> result;
-    mkdir(kWadDir, 0777);  // create on first run so user has somewhere to drop WADs
-    DIR* d = opendir(kWadDir);
-    if (!d) return result;
+// Scan one directory for *.wad files, append to `result`, dedupe against
+// existing entries by case-insensitive basename so the legacy directory
+// doesn't shadow a primary-directory WAD with the same name.
+static void scan_wad_dir(const char* dir, std::vector<WadEntry>& result) {
+    if (!dir || !dir[0]) return;
+    mkdir(dir, 0777);
+    DIR* d = opendir(dir);
+    if (!d) return;
     struct dirent* entry;
     while ((entry = readdir(d)) != nullptr) {
         const char* name = entry->d_name;
         size_t len = std::strlen(name);
-        if (len > 4 && strcasecmp(name + len - 4, ".wad") == 0) {
-            WadEntry e;
-            e.filename     = name;
-            e.fullpath     = std::string(kWadDir) + "/" + name;
-            e.display_name = friendly_wad_name(e.filename);
-            result.push_back(std::move(e));
+        if (len <= 4 || strcasecmp(name + len - 4, ".wad") != 0) continue;
+        bool dupe = false;
+        for (const auto& e : result) {
+            if (strcasecmp(e.filename.c_str(), name) == 0) { dupe = true; break; }
         }
+        if (dupe) continue;
+        WadEntry e;
+        e.filename     = name;
+        e.fullpath     = std::string(dir) + "/" + name;
+        e.display_name = friendly_wad_name(e.filename);
+        result.push_back(std::move(e));
     }
     closedir(d);
+}
+
+std::vector<WadEntry> scan_wads() {
+    std::vector<WadEntry> result;
+    scan_wad_dir(kWadDir,       result);  // primary: /roms/doom
+    scan_wad_dir(kWadDirLegacy, result);  // fallback: /switch/sx-doom-overlay
     return result;
 }
 
-// Trace logger — writes to sdmc:/config/sx-doom-overlay/trace.log so
-// if the engine crashes we can read the file off the SD and see exactly
-// how far it got. Lightweight: opens append, writes one line, closes.
-//
-// IMPORTANT: uses snprintf+fwrite, NOT fprintf. Our stdio_stubs.c overrides
-// fprintf to a no-op (necessary because the engine has 220+ unguarded prints
-// that crash on NULL stdout). Going through fprintf here would silently drop
-// the line. snprintf-into-buffer + fwrite reaches the file.
-extern "C" void doom_trace(const char* msg);
-
-void doom_trace(const char* msg) {
-    FILE* f = std::fopen("sdmc:/config/sx-doom-overlay/trace.log", "a");
+extern "C" void doom_trace(const char* msg) {
+    FILE* f = std::fopen(kTraceLog, "a");
     if (f) {
+        // snprintf+fwrite, NOT fprintf: stdio_stubs.c overrides fprintf to a
+        // no-op (prevents 220+ unguarded engine prints crashing on NULL stdout).
+        // Going through fprintf here would silently drop the line.
         char line[256];
         const unsigned ts_ms = static_cast<unsigned>(armTicksToNs(armGetSystemTick()) / 1000000ULL);
         const int n = std::snprintf(line, sizeof(line), "[%u] %s\n", ts_ms, msg);
@@ -195,14 +199,11 @@ void doom_trace(const char* msg) {
     }
 }
 
-void try_init_engine(const char* iwad_path, int warp_episode, int warp_map) {
-    // Ensure log directory exists.
+void try_init_engine(const char* iwad_path) {
     mkdir("sdmc:/config", 0777);
-    mkdir("sdmc:/config/sx-doom-overlay", 0777);
+    mkdir(kConfigDir, 0777);
     doom_trace("=== try_init_engine ===");
 
-    // setjmp checkpoint — if the engine longjmps from any I_Error /
-    // I_Quit path (patches/0002), we land here with err != 0.
     int err = setjmp(g_doom_error_jmp);
     if (err != 0) {
         char buf[160];
@@ -214,18 +215,10 @@ void try_init_engine(const char* iwad_path, int warp_episode, int warp_map) {
         return;
     }
 
-    // argv for doomgeneric_Create. WAD chosen by WadPickerGui.
-    //   -iwad <path>   — IWAD to load (passed in)
-    //   -mb 4          — zone allocator size in MiB. -mb 6 confirmed too tight
-    //                    (Z_Init malloc fails, longjmp 6 in 6ms after framebuffer
-    //                    fixes). Libtesla overlay heap can't spare 6 contiguous MiB.
-    //   SFX enabled via DG_sound_module in i_sound_switch.c (SWITCH_SOUND).
-    //   Music enabled via DG_music_module → music_opl_module (Nuked-OPL3
-    //   FM synth, vendored from chocolate-doom in source/opl/).
     if (!iwad_path || iwad_path[0] == '\0') {
         g_doom_failed = true;
         std::snprintf(g_doom_error_msg, sizeof(g_doom_error_msg), "No IWAD selected");
-        doom_trace("try_init_engine called with empty iwad_path");
+        doom_trace("try_init_engine: empty iwad_path");
         return;
     }
     {
@@ -234,54 +227,40 @@ void try_init_engine(const char* iwad_path, int warp_episode, int warp_map) {
         doom_trace(buf);
     }
 
+    // STATIC: doomgeneric stores myargv as a pointer copy (no deep copy).
+    // Stack-local storage would dangle after this function returns.
+    //
+    // We deliberately DO NOT pass -nomusic. The OPL music engine (vendored
+    // chocolate-doom in source/opl/) is wired via i_sound_switch.c's
+    // DG_music_module → music_opl_module bridge, and InitMusicModule binds
+    // it during D_DoomMain. The 512 KB MIDI arena is Z_Malloc'd at music
+    // init time. SFX is wired similarly via DG_sound_module.
     static char arg_doom[]    = "doom";
     static char arg_iwad[]    = "-iwad";
     static char arg_iwadpath[256];
     static char arg_mb[]      = "-mb";
-    static char arg_mbsize[]  = "4";
-    static char arg_warp[]    = "-warp";
-    static char arg_warp_e[8]; // "1".."4"
-    static char arg_warp_m[8]; // "1".."32"
-    static char arg_skill[]   = "-skill";
-    static char arg_skill_n[] = "2";  // "I'm too young to die"
+    static char arg_mbsize[]  = "4";  // -mb 6 is too tight; 4 MiB confirmed working
     std::strncpy(arg_iwadpath, iwad_path, sizeof(arg_iwadpath) - 1);
     arg_iwadpath[sizeof(arg_iwadpath) - 1] = '\0';
-    // STATIC: doomgeneric stores `myargv = argv` (pointer copy, no deep copy
-    // — see lib/doomgeneric/doomgeneric/doomgeneric.c:17). If this array
-    // were stack-local, the pointer would dangle the moment try_init_engine
-    // returns; later ticks scanning args (G_DoPlayDemo's M_CheckParm calls,
-    // etc.) would deref freed stack memory and crash. Static storage gives
-    // the array program lifetime to match the engine's reference.
-    static char* engine_argv[16];
-    int idx = 0;
-    engine_argv[idx++] = arg_doom;
-    engine_argv[idx++] = arg_iwad;
-    engine_argv[idx++] = arg_iwadpath;
-    engine_argv[idx++] = arg_mb;
-    engine_argv[idx++] = arg_mbsize;
-    if (warp_episode > 0 && warp_map > 0) {
-        std::snprintf(arg_warp_e, sizeof(arg_warp_e), "%d", warp_episode);
-        std::snprintf(arg_warp_m, sizeof(arg_warp_m), "%d", warp_map);
-        engine_argv[idx++] = arg_warp;
-        engine_argv[idx++] = arg_warp_e;
-        engine_argv[idx++] = arg_warp_m;
-        engine_argv[idx++] = arg_skill;
-        engine_argv[idx++] = arg_skill_n;
-        char dbg[64];
-        std::snprintf(dbg, sizeof(dbg), "warp to E%dM%d", warp_episode, warp_map);
-        doom_trace(dbg);
-    }
-    engine_argv[idx]   = nullptr;
-    int engine_argc    = idx;
+    static char* engine_argv[] = {
+        arg_doom, arg_iwad, arg_iwadpath,
+        arg_mb, arg_mbsize,
+        nullptr
+    };
+    int engine_argc = 5;
 
     doom_trace("calling doomgeneric_Create...");
     doomgeneric_Create(engine_argc, engine_argv);
     doom_trace("doomgeneric_Create returned OK");
     g_doom_initialized = true;
 
-    // Pre-build palette LUT from the engine's current colors[] table.
-    // Doom calls I_SetPalette during D_DoomMain init which populates
-    // colors[]; we read it here and refresh every frame if changed.
+    // Pre-set quickSaveSlot so the Save button (F6) skips the "set a slot
+    // first" prompt and goes straight to the "Y/N over slot 0?" dialog
+    // (which we auto-confirm with 'y' from onTouch). Slot 0 is the canonical
+    // "savestate" slot for our purposes; user can still use F2/F3-style
+    // multi-slot saves through the Doom in-game menu (Plus button).
+    quickSaveSlot = 0;
+
     doom_blit::build_palette_lut_from_argb_struct(
         reinterpret_cast<const uint8_t*>(&colors[0]), g_palette_lut);
     palette_changed = false;
@@ -289,243 +268,285 @@ void try_init_engine(const char* iwad_path, int warp_episode, int warp_map) {
 
 }  // namespace
 
-// Touch buttons rendered in the empty margin below the Doom viewport.
-// Each button is a tap target with a static label and an action callback.
-//
-// Layout: Doom viewport occupies y=260..460 (320×200 centered in 448×720).
-// We place three vertically-stacked 40px buttons in y=475..615, centered
-// horizontally at x=124 (200px wide → spans x=124..324 inside the 448 FB).
-struct OverlayButton {
-    int x, y, w, h;
-    const char* label;
-    void (*action)();
-};
+class ConfigGui final : public tsl::Gui {
+public:
+    tsl::elm::Element* createUI() override {
+        auto* frame = new DoomOverlayFrame("Back", "");
+        auto* list  = new tsl::elm::List();
 
-void action_change_wad();
-void action_show_controls();
-void action_quit_overlay();
-void draw_wads_header(tsl::gfx::Renderer* renderer, const char* subtitle);
+        list->addItem(new tsl::elm::CategoryHeader("Display"));
 
-// Two horizontal touch buttons at the very bottom.
-constexpr OverlayButton kOverlayButtons[] = {
-    {  16, 678, 200, 36, "Quit",      &action_quit_overlay   },
-    { 232, 678, 200, 36, "Controls",  &action_show_controls  },
-};
-constexpr int kOverlayButtonCount = sizeof(kOverlayButtons) / sizeof(kOverlayButtons[0]);
+        auto* grid_item = new tsl::elm::ToggleListItem("LCD Grid", g_lcd_grid, ult::ON, ult::OFF);
+        grid_item->setStateChangedListener([](bool state) {
+            g_lcd_grid = state;
+            save_lcd_grid();
+        });
+        list->addItem(grid_item);
 
-class DoomElement final : public tsl::elm::Element {
-   public:
-    void draw(tsl::gfx::Renderer* renderer) override {
-        // If engine init failed, render the error message instead of trying
-        // to blit garbage from an uninitialized DG_ScreenBuffer.
-        if (g_doom_failed) {
-            renderer->fillScreen(tsl::Color(0xF000));  // black
-            renderer->drawString("Doom engine init failed:", false, 16, 32, 22, tsl::Color(0xFFFF));
-            renderer->drawString(g_doom_error_msg,           false, 16, 64, 18, tsl::Color(0xFA0F));
-            return;
-        }
-        if (!g_doom_initialized) {
-            renderer->fillScreen(tsl::Color(0xF000));
-            renderer->drawString("Loading Doom...", false, 16, 32, 22, tsl::Color(0xFFFF));
-            return;
-        }
-
-        // Refresh palette LUT if the engine switched palette (damage flash etc.)
-        if (palette_changed) {
-            doom_blit::build_palette_lut_from_argb_struct(
-                reinterpret_cast<const uint8_t*>(&colors[0]), g_palette_lut);
-            palette_changed = false;
-        }
-
-        // Blit the engine's 320×200 indexed buffer at integer scale into
-        // libtesla's framebuffer.
-        //
-        // CRITICAL: libtesla's framebuffer is block-linear (Tegra GPU
-        // swizzled), NOT flat row-major. See processRectChunk in
-        // tesla.hpp:1390-1393 which uses blockLinearYPart() for row
-        // addressing. Writing dst[y*w + x] directly is wrong and
-        // scribbles memory all over libtesla's state, eventually
-        // crashing Atmosphère. Route through Renderer::setPixel() which
-        // calls getPixelOffset() (the correct swizzle) under the hood.
-        //
-        // Refresh status info once per second (every ~60 composite frames).
-        // psm/time queries are cheap but no need to hammer them.
-        static u32 s_frame_counter = 0;
-        if ((++s_frame_counter % 60) == 0) {
-            refresh_sys_status();
-        }
-
-        // Color palette — libtesla uses ABGR4444 (alpha high, red LOW nibble).
-        const tsl::Color kBg          (0xF000);  // black
-        const tsl::Color kFrameMid    (0xF333);  // dark gray (frame body)
-        const tsl::Color kFrameBevelHi(0xF666);  // mid gray (subtle bevel hint)
-        const tsl::Color kLabelDim    (0xF888);  // medium gray
-        const tsl::Color kLabelDoom   (0xF03F);  // Doom red-orange
-        const tsl::Color kBtnBg       (0xF222);  // subtle button bg
-        const tsl::Color kBtnText     (0xFFFF);  // white
-
-        // Full-screen black background (we own the entire framebuffer now —
-        // OverlayFrame is passed empty title strings so it doesn't draw text).
-        renderer->fillScreen(kBg);
-
-        // ====== WAD-derived 4-letter gradient logo (top-left) ======
-        // Title = first 4 alphanumeric chars of the loaded WAD name, uppercase.
-        // So "Chex Quest 3" → CHEX, "Freedoom Phase 1" → FREE, "Doom (Ultimate)"
-        // → DOOM. Strong red→yellow gradient (full color range — was barely
-        // noticeable before with red→orange only). Drop-shadow for depth.
-        {
-            char logo[5] = {0};
-            int  jj = 0;
-            for (size_t ii = 0; ii < g_wad_display_name.size() && jj < 4; ++ii) {
-                const char c = g_wad_display_name[ii];
-                if (c >= 'A' && c <= 'Z') logo[jj++] = c;
-                else if (c >= 'a' && c <= 'z') logo[jj++] = static_cast<char>(c - 32);
-                else if (c >= '0' && c <= '9') logo[jj++] = c;
-                // skip spaces / punctuation
-            }
-            if (jj == 0) { logo[0]='D'; logo[1]='G'; logo[2]='E'; logo[3]='N'; jj=4; }
-
-            // Strong gradient: red → orange → yellow → bright yellow.
-            // ABGR4444 nibble-by-nibble (A=F, B=0..F, G=0..F, R=0..F).
-            const tsl::Color colors[4] = {
-                tsl::Color(0xF00F),  // pure red                  R=F G=0 B=0
-                tsl::Color(0xF05F),  // red-orange                R=F G=5 B=0
-                tsl::Color(0xF0AF),  // orange                    R=F G=A B=0
-                tsl::Color(0xF0FF),  // bright yellow             R=F G=F B=0
-            };
-            const tsl::Color kLogoShadow(0xF002);  // dark red shadow
-
-            int lx = 16;
-            for (int i = 0; i < jj; ++i) {
-                char one[2] = { logo[i], '\0' };
-                renderer->drawString(one, false, lx + 2, 40, 32, kLogoShadow);
-                renderer->drawString(one, false, lx,     38, 32, colors[i]);
-                lx += 30;
-            }
-
-            // Full WAD name as subtitle directly under the logo.
-            if (!g_wad_display_name.empty()) {
-                renderer->drawString(g_wad_display_name.c_str(), false, 16, 64, 14, kLabelDim);
-            }
-        }
-
-        // ====== Status panel — vertical stack in the top-right ======
-        // Three lines, ~22px apart so labels don't collide:
-        //   Time       (always gray)
-        //   BAT xx%    (color by level)
-        //   MEM xx/yyK (color by % used)
-        {
-            char buf[48];
-            constexpr int kStatusX = kFbWidth - 130;
-
-            // Battery color thresholds
-            const int bat = g_sys_status.battery_pct;
-            tsl::Color bat_col = (bat >= 50) ? tsl::Color(0xF0F0)
-                               : (bat >= 20) ? tsl::Color(0xF0FF)
-                                             : tsl::Color(0xF00F);
-
-            // Memory color thresholds
-            unsigned mem_pct = g_sys_status.heap_total_kb
-                                 ? (g_sys_status.heap_used_kb * 100u) / g_sys_status.heap_total_kb
-                                 : 0;
-            tsl::Color mem_col = (mem_pct < 70) ? tsl::Color(0xF0F0)
-                               : (mem_pct < 90) ? tsl::Color(0xF0FF)
-                                                : tsl::Color(0xF00F);
-
-            renderer->drawString(g_sys_status.time_str, false, kStatusX, 30, 14, kLabelDim);
-
-            if (bat >= 0) {
-                std::snprintf(buf, sizeof(buf), "BAT %d%%", bat);
-                renderer->drawString(buf, false, kStatusX, 52, 14, bat_col);
-            }
-
-            std::snprintf(buf, sizeof(buf), "MEM %u/%uK",
-                          g_sys_status.heap_used_kb, g_sys_status.heap_total_kb);
-            renderer->drawString(buf, false, kStatusX, 74, 14, mem_col);
-        }
-
-        // ====== Doom viewport (1.4× nearest-neighbor stretch, full FB width) ======
-        // 4-px gray bar above + below as soft framing (no glow, no animation).
-        renderer->drawRect(0, kDisplayY - 4, kFbWidth, 4, kFrameMid);
-        renderer->drawRect(0, kDisplayY + kDisplayH, kFbWidth, 4, kFrameMid);
-
-        const std::uint8_t* src = reinterpret_cast<const std::uint8_t*>(DG_ScreenBuffer);
-        if (src) {
-            for (int dy = 0; dy < kDisplayH; ++dy) {
-                const int sy = (dy * kDoomH) / kDisplayH;          // nearest-neighbor
-                const std::uint8_t* row = src + sy * kDoomW;
-                const int target_y = kDisplayY + dy;
-                for (int dx = 0; dx < kDisplayW; ++dx) {
-                    const int sx = (dx * kDoomW) / kDisplayW;
-                    renderer->setPixel(kDisplayX + dx, target_y, tsl::Color(g_palette_lut[row[sx]]));
-                }
-            }
-        }
-
-        // ====== Touch buttons (Ultrahand list-row style — text + separator) ======
-        // No boxy background — text on the panel bg with a thin separator line
-        // below each row, like libtesla's ListItem default rendering.
-        const tsl::Color kListSep(0xF333);
-        for (int i = 0; i < kOverlayButtonCount; ++i) {
-            const auto& b = kOverlayButtons[i];
-            renderer->drawString(b.label, false, b.x + 16, b.y + 26, 18, kBtnText);
-            renderer->drawRect(b.x, b.y + b.h - 1, b.w, 1, kListSep);
-        }
+        frame->setContent(list);
+        return frame;
     }
 
-    void layout(u16 /*parentX*/, u16 /*parentY*/, u16 /*parentWidth*/, u16 /*parentHeight*/) override {}
-    bool handleInput(u64 /*keysDown*/, u64 /*keysHeld*/, const HidTouchState& /*touchPos*/,
-                     HidAnalogStickState /*joyStickPosLeft*/, HidAnalogStickState /*joyStickPosRight*/) override {
+    bool handleInput(u64 keysDown, u64, const HidTouchState&,
+                     HidAnalogStickState, HidAnalogStickState) override {
+        const bool simulatedBack = ult::simulatedNextPage.exchange(false, std::memory_order_acq_rel);
+        if (simulatedBack || (keysDown & HidNpadButton_Left) || (keysDown & HidNpadButton_B)) {
+            tsl::goBack();
+            return true;
+        }
         return false;
     }
 };
 
-// Forward declarations for cross-referencing GUI transitions.
-// tsl::changeTo<T> needs T complete at the call site, so the bodies that
-// reference other GUIs are defined out-of-line below.
-class WadPickerGui;
-class ControlsHelpGui;
-class SettingsGui;
-class LevelPickerGui;
+// Bottom-row action buttons — positioned exactly where the WAD picker's
+// footer renders ("B Back  A OK"), reusing the same y baseline + height
+// (73 px) and corner radius (12.0f) so the look is libtesla-native.
+//
+// The frame's own footer is hidden during gameplay (m_footerHidden=true),
+// so this 73-px band is free for our touch actions.
+constexpr int kFooterY      = 720 - 73;            // 647 — top of footer band
+constexpr int kFooterH      = 73;                  // libtesla standard
+constexpr int kFooterTextY  = 693;                 // matches DoomOverlayFrame
+constexpr int kFooterFont   = 23;                  // matches DoomOverlayFrame
 
-class DoomGui final : public tsl::Gui {
-   public:
-    DoomGui(std::string wad_path, std::string wad_display_name,
-            int warp_episode = 0, int warp_map = 0)
-        : m_wadPath(std::move(wad_path)),
-          m_wadDisplayName(std::move(wad_display_name)),
-          m_warpEpisode(warp_episode),
-          m_warpMap(warp_map) {
-        g_wad_display_name = m_wadDisplayName;
+// Three evenly-spaced touch zones across the 448 px width. ~10 px gaps.
+constexpr int kBtnSaveX = 30;
+constexpr int kBtnSaveW = 122;
+constexpr int kBtnLoadX = 162;
+constexpr int kBtnLoadW = 122;
+constexpr int kBtnQuitX = 294;
+constexpr int kBtnQuitW = 122;
+
+// Helpers used by the Save/Load/Quit ListItem click listeners.
+namespace doom_actions {
+
+inline void save_state() {
+    // F6 → opens "Quicksave over slot 0?" prompt (quickSaveSlot pre-set to 0
+    // in try_init_engine). ENTER auto-confirms because m_controls.c:157 sets
+    // key_menu_confirm = 13 (ENTER) for controller users. Net effect:
+    // emulator-style one-touch save to per-WAD slot 0.
+    doom_trace("Save State: F6 + ENTER");
+    doomgeneric_switch_push_key(1, kDoomKeyF6);
+    doomgeneric_switch_push_key(0, kDoomKeyF6);
+    doomgeneric_switch_push_key(1, kDoomKeyEnter);
+    doomgeneric_switch_push_key(0, kDoomKeyEnter);
+}
+
+inline void load_state() {
+    // F9 + ENTER — quickload from slot 0, auto-confirm prompt.
+    doom_trace("Load State: F9 + ENTER");
+    doomgeneric_switch_push_key(1, kDoomKeyF9);
+    doomgeneric_switch_push_key(0, kDoomKeyF9);
+    doomgeneric_switch_push_key(1, kDoomKeyEnter);
+    doomgeneric_switch_push_key(0, kDoomKeyEnter);
+}
+
+inline void quit_overlay() {
+    // CRITICAL: set launchComboHasTriggered before close. Without it,
+    // libtesla's close path runs the "exit feedback sound" branch
+    // (tesla.hpp:13867) which conflicts with our audio backend teardown
+    // and crashes Atmosphère. Combo close sets this flag; the original
+    // sx-doom-overlay Quit button didn't, hence the combo-vs-button
+    // crash asymmetry the user noticed.
+    doom_trace("Quit: launch-combo-style close");
+    launchComboHasTriggered.store(true, std::memory_order_release);
+    tsl::Overlay::get()->close();
+}
+
+}  // namespace doom_actions
+
+// Game viewport rendering — extracted as a free function so we can drop it
+// into a tsl::elm::CustomDrawer (which gives us a non-interactive rendering
+// region inside a libtesla List, sized by the list).
+//
+// Draws either: failure message, "Loading…" placeholder, OR the scaled Doom
+// framebuffer (320×200 → 448×336 nearest-neighbor) followed by a one-line
+// memory counter (newlib + Doom Z_Malloc zone).
+inline void draw_doom_viewport(tsl::gfx::Renderer* renderer,
+                               s32 boundsX, s32 boundsY, s32 boundsW, s32 boundsH) {
+    (void)boundsX; (void)boundsW; (void)boundsH;
+
+    if (g_doom_failed) {
+        renderer->drawString("Engine init failed:", false, 20, boundsY + 60, 22, tsl::Color(0xFFFF));
+        renderer->drawString(g_doom_error_msg,      false, 20, boundsY + 100, 18, tsl::Color(0xFA0F));
+        return;
+    }
+    if (!g_doom_initialized) {
+        renderer->drawString("Loading...", false, 20, boundsY + 60, 22, tsl::Color(0xFFFF));
+        return;
     }
 
+    if (palette_changed) {
+        doom_blit::build_palette_lut_from_argb_struct(
+            reinterpret_cast<const uint8_t*>(&colors[0]), g_palette_lut);
+        palette_changed = false;
+    }
+
+    // Scale 320x200 → 448x336 (fill-width, correct 4:3 Doom aspect).
+    // Background already filled by DoomOverlayFrame::draw().
+    const std::uint8_t* src = reinterpret_cast<const std::uint8_t*>(DG_ScreenBuffer);
+    if (src) {
+        const bool doGrid = g_lcd_grid;
+        for (int dy = 0; dy < kScaledH; ++dy) {
+            const int sy = dy * kDoomH / kScaledH;
+            const std::uint8_t* srow = src + sy * kDoomW;
+            const int fy = kDoomOffsetY + dy;
+            const bool dimRow = doGrid && (dy % 2 == 1);
+            for (int dx = 0; dx < kScaledW; ++dx) {
+                const int sx = dx * kDoomW / kScaledW;
+                tsl::Color col(g_palette_lut[srow[sx]]);
+                if (dimRow || (doGrid && (dx % 2 == 1))) {
+                    col = tsl::Color({u8(col.r >> 1), u8(col.g >> 1), u8(col.b >> 1), col.a});
+                }
+                renderer->setPixel(dx, fy, col);
+            }
+        }
+    }
+
+    // Memory counter — newlib (mostly static post-init) + Doom Z_Malloc zone
+    // (visibly fluctuates as lump/sound cache loads + evicts).
+    {
+        static u64 mem_last_sample_ns = 0;
+        static char mem_label[112] = "mem: …";
+        const u64 now_ns = armTicksToNs(armGetSystemTick());
+        if (now_ns - mem_last_sample_ns > 1'000'000'000ULL) {
+            mem_last_sample_ns = now_ns;
+            const struct mallinfo mi = mallinfo();
+            const size_t newlib_used_kb = static_cast<size_t>(mi.uordblks) / 1024;
+            const size_t newlib_free_kb = static_cast<size_t>(mi.fordblks) / 1024;
+            const size_t zone_free_kb   =
+                g_doom_initialized
+                ? static_cast<size_t>(Z_FreeMemory()) / 1024
+                : 0;
+            std::snprintf(mem_label, sizeof(mem_label),
+                          "newlib: %zuk used / %zuk free   doom zone: %zuk free",
+                          newlib_used_kb, newlib_free_kb, zone_free_kb);
+        }
+        // Draw just below the game viewport.
+        renderer->drawString(mem_label, false, 20,
+                             kDoomOffsetY + kScaledH + 18, 14,
+                             tsl::Color(0xCFFF));
+    }
+}
+
+// Single content element for the Doom GUI: game viewport + bottom-row
+// action buttons. The buttons render in libtesla-footer style — same
+// y baseline (693), same font size (23 pt), same corner radius (12 px),
+// same colors (a(tsl::clickColor) highlight, a(tsl::bottomTextColor)
+// text) as Ethan's WAD picker footer ("B Back  A OK"). Touch-only:
+// idle state shows just the label; press shows the rounded-rect
+// highlight; release-in-bounds fires the action; drag-out cancels.
+class DoomElement final : public tsl::elm::Element {
+public:
+    void draw(tsl::gfx::Renderer* renderer) override {
+        // Game viewport + memory line.
+        draw_doom_viewport(renderer, getX(), getY(), getWidth(), getHeight());
+
+        if (!g_doom_initialized || g_doom_failed) return;
+
+        // Footer-style row at y=647..720. Three touch buttons:
+        //   ⬇ Save  /  ⬆ Load  /  ✕ Quit
+        // Unicode glyphs (not Switch button glyphs) so they don't falsely
+        // imply controller-button bindings — these are touch-only:
+        //   ⬇ U+2B07  "save down to disk"
+        //   ⬆ U+2B06  "load up from disk"
+        //   ✕ U+2715  "close / exit"
+        // Rendered with drawString in libtesla's bottomTextColor — same
+        // y baseline (693) and font (23 pt) as the WAD picker's footer.
+        static constexpr const char* kSaveLabel = "\xE2\xAC\x87 Save";   // ⬇ Save
+        static constexpr const char* kLoadLabel = "\xE2\xAC\x86 Load";   // ⬆ Load
+        static constexpr const char* kQuitLabel = "\xE2\x9C\x95 Quit";   // ✕ Quit
+
+        auto draw_btn = [&](int x, int w, const char* label, bool pressed) {
+            if (pressed) {
+                renderer->drawRoundedRect(static_cast<float>(x),
+                                          static_cast<float>(kFooterY),
+                                          static_cast<float>(w),
+                                          static_cast<float>(kFooterH),
+                                          12.f, a(tsl::clickColor));
+            }
+            const auto td = renderer->getTextDimensions(label, false, kFooterFont);
+            const int tx = x + (w - static_cast<int>(td.first)) / 2;
+            renderer->drawString(label, false, tx, kFooterTextY,
+                                 kFooterFont, a(tsl::bottomTextColor));
+        };
+        draw_btn(kBtnSaveX, kBtnSaveW, kSaveLabel, m_btnPressed == 1);
+        draw_btn(kBtnLoadX, kBtnLoadW, kLoadLabel, m_btnPressed == 2);
+        draw_btn(kBtnQuitX, kBtnQuitW, kQuitLabel, m_btnPressed == 3);
+    }
+
+    void layout(u16, u16, u16, u16) override {}
+
+    bool handleInput(u64, u64, const HidTouchState&,
+                     HidAnalogStickState, HidAnalogStickState) override {
+        return false;
+    }
+
+    bool onTouch(tsl::elm::TouchEvent event,
+                 s32 currX, s32 currY,
+                 s32 prevX, s32 prevY,
+                 s32 initialX, s32 initialY) override {
+        (void)prevX; (void)prevY; (void)initialX; (void)initialY;
+        auto inBtn = [&](int x, int w) {
+            return currX >= x && currX < x + w &&
+                   currY >= kFooterY && currY < kFooterY + kFooterH;
+        };
+        if (event == tsl::elm::TouchEvent::Touch) {
+            if      (inBtn(kBtnSaveX, kBtnSaveW)) { m_btnPressed = 1; return true; }
+            else if (inBtn(kBtnLoadX, kBtnLoadW)) { m_btnPressed = 2; return true; }
+            else if (inBtn(kBtnQuitX, kBtnQuitW)) { m_btnPressed = 3; return true; }
+        }
+        if (event == tsl::elm::TouchEvent::Release) {
+            const int hit = m_btnPressed;
+            m_btnPressed = 0;
+            if (hit == 1 && inBtn(kBtnSaveX, kBtnSaveW)) { doom_actions::save_state();   return true; }
+            if (hit == 2 && inBtn(kBtnLoadX, kBtnLoadW)) { doom_actions::load_state();   return true; }
+            if (hit == 3 && inBtn(kBtnQuitX, kBtnQuitW)) { doom_actions::quit_overlay(); return true; }
+        }
+        return false;
+    }
+
+private:
+    int m_btnPressed = 0;  // 0=none, 1=Save, 2=Load, 3=Quit
+};
+
+
+class DoomGui final : public tsl::Gui {
+public:
+    explicit DoomGui(std::string wad_path) : m_wadPath(std::move(wad_path)) {}
+
+    ~DoomGui() { tsl::disableHiding = false; }
+
     tsl::elm::Element* createUI() override {
-        // Pass empty strings so OverlayFrame doesn't draw its own title text —
-        // we render a custom gradient "DOOM" logo + status panel in the header
-        // area inside DoomElement::draw, matching Ultrahand's logo style.
-        auto* frame = new tsl::elm::OverlayFrame("", "");
+        tsl::disableHiding = true;   // combo must close (not hide) while game runs
+        m_frame = new DoomOverlayFrame("", "Configure");
+
+        // Single content element that draws the game viewport at the top
+        // and a libtesla-footer-style action row (Save State / Load State
+        // / Quit) at the bottom — same visual idiom as the WAD picker's
+        // "B Back  A OK" footer. The frame's own footer stays hidden
+        // (m_footerHidden=true set after engine init) so we can reuse the
+        // 73 px footer band for our touch actions.
         m_doomElement = new DoomElement();
-        frame->setContent(m_doomElement);
-        return frame;
+        m_frame->setContent(m_doomElement);
+        return m_frame;
     }
 
     void update() override {
-        // Lazy-init: doomgeneric_Create is heavy (allocates zone, loads WAD).
-        // Do it on first update() call instead of in initServices() so the
-        // libtesla framebuffer is already set up — engine init may print
-        // banner messages we want visible if anything fails.
+        // Lazy-init: doomgeneric_Create is heavy. Do it on first update() so
+        // the framebuffer is already set up before we attempt to draw anything.
         if (!g_doom_initialized && !g_doom_failed) {
-            try_init_engine(m_wadPath.c_str(), m_warpEpisode, m_warpMap);
-            return;  // give the UI one composite to settle before ticking
+            try_init_engine(m_wadPath.c_str());
+            if (g_doom_initialized && m_frame)
+                m_frame->setFooterHidden(true);
+            return;
         }
         if (g_doom_failed) return;
 
-        // 35 Hz tick accumulator. Cap at 4 catch-up ticks per update() to
-        // avoid a "spiral of death" if libtesla composite stalls — Doom
-        // gracefully handles dropped frames.
-        static u64 last_ns = 0;
+        // 35 Hz tick accumulator. Cap at 4 catch-up ticks to avoid spiral of death.
+        static u64 last_ns  = 0;
         static u64 accum_ns = 0;
-        constexpr u64 kTickPeriodNs    = 1'000'000'000ULL / 35ULL;  // ~28.6 ms
+        constexpr u64 kTickPeriodNs    = 1'000'000'000ULL / 35ULL;
         constexpr int kMaxCatchupTicks = 4;
         constexpr u64 kCatchupCapNs    = kTickPeriodNs * kMaxCatchupTicks;
 
@@ -534,15 +555,9 @@ class DoomGui final : public tsl::Gui {
         const u64 delta_ns = now_ns - last_ns;
         last_ns = now_ns;
 
-        // Resume-from-dismiss handling: if the gap since our last tick is
-        // larger than the catch-up cap, the overlay was hidden (touched-out)
-        // and resumed. Don't try to walk the engine forward through the
-        // dismissal interval — that would burn 4 ticks per update() until
-        // the debt drained, freezing gameplay for many seconds. Instead
-        // discard the gap and resume at real-time. The engine's own clock
-        // was already re-anchored in DoomOverlay::onShow().
+        // Resume-from-dismiss: discard giant gaps so we don't try to catch up
+        // across the entire dismissal interval (engine clock re-anchored in onShow).
         if (delta_ns > kCatchupCapNs) {
-            doom_trace("resume: discarded huge tick delta");
             accum_ns = 0;
         } else {
             accum_ns += delta_ns;
@@ -554,89 +569,67 @@ class DoomGui final : public tsl::Gui {
             accum_ns -= kTickPeriodNs;
             ticks_run++;
         }
-        // If we missed by more than the catch-up cap, drop the surplus.
         if (accum_ns >= kTickPeriodNs * kMaxCatchupTicks) {
             accum_ns = 0;
         }
     }
 
-    bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState& touchPos,
-                     HidAnalogStickState leftStick, HidAnalogStickState rightStick) override;
+    bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState&,
+                     HidAnalogStickState, HidAnalogStickState) override {
+        const u64 keysUp = m_prevKeysHeld & ~keysHeld;
+        m_prevKeysHeld = keysHeld;
 
-   private:
-    bool         m_prevTouched = false;  // edge-detect taps
-    std::string  m_wadPath;
-    std::string  m_wadDisplayName;
-    int          m_warpEpisode = 0;      // 0 = no warp; else 1..4
-    int          m_warpMap     = 0;      // 0 = no warp; else 1..32
-    DoomElement* m_doomElement = nullptr;
-    u64          m_prevKeysHeld = 0;
+        // Close overlay with the user's configured Ultrahand launch combo.
+        // Same combo that opened the overlay — intuitive and user-configurable.
+        const bool launchCombo =
+            (keysDown & tsl::cfg::launchCombo) &&
+            (((keysDown | keysHeld) & tsl::cfg::launchCombo) == tsl::cfg::launchCombo);
+        if (launchCombo) {
+            doom_trace("launch combo — closing overlay");
+            launchComboHasTriggered.store(true, std::memory_order_release);
+            tsl::Overlay::get()->close();
+            return true;
+        }
+
+        // Minus alone → settings.
+        const bool simulatedNext = ult::simulatedNextPage.exchange(false, std::memory_order_acq_rel);
+        if (simulatedNext || ((keysDown & HidNpadButton_Minus) && !(keysHeld & HidNpadButton_Plus))) {
+            tsl::changeTo<ConfigGui>();
+            return true;
+        }
+
+        if (g_doom_initialized && !g_doom_failed) {
+            doom_input::dispatch(keysDown, keysUp);
+        }
+
+        return true;
+    }
+
+private:
+    std::string       m_wadPath;
+    DoomOverlayFrame* m_frame        = nullptr;
+    DoomElement*      m_doomElement  = nullptr;
+    u64               m_prevKeysHeld = 0;
 };
 
-// ControlsHelpGui — static cheat sheet listing all button bindings. Pushed onto
-// the stack from the "Show Controls" touch button; B returns to DoomGui.
-class ControlsHelpGui final : public tsl::Gui {
-   public:
-    tsl::elm::Element* createUI() override;
-};
-
-// SettingsGui — overlay-side settings page. Currently a status read-out (no
-// runtime-tweakable knobs yet). Pushed from the WAD picker's "Settings" item.
-// Future home for: audio toggle, turn-sensitivity slider, render-scale picker
-// (when bigger viewport ships), volume sliders (when audio works).
-class SettingsGui final : public tsl::Gui {
-   public:
-    tsl::elm::Element* createUI() override;
-};
-
-// LevelPickerGui — intermediate picker between WAD selection and DoomGui.
-// Lets the user warp directly to a specific level instead of starting at the
-// title screen. Useful for skipping past crashing levels (Doom E1M3 reportedly
-// crashes for some users), and for picking up testing where a previous run
-// died. "Default" preserves the title-screen attract-demo experience.
-class LevelPickerGui final : public tsl::Gui {
-   public:
-    LevelPickerGui(std::string wad_path, std::string wad_display_name)
-        : m_wadPath(std::move(wad_path)),
-          m_wadDisplayName(std::move(wad_display_name)) {}
-    tsl::elm::Element* createUI() override;
-   private:
-    std::string m_wadPath;
-    std::string m_wadDisplayName;
-};
-
-// WadPickerGui — first screen the user sees. Lists all *.wad files in
-// /switch/sx-doom-overlay/, user presses A to pick one, transitions to DoomGui
-// with the chosen path. If no WADs found, shows where to drop them.
-//
-// Uses HeaderOverlayFrame so we can render a custom-drawn colored "WADS"
-// gradient logo as the header (matching the in-game per-WAD logo style).
 class WadPickerGui final : public tsl::Gui {
-   public:
+public:
     tsl::elm::Element* createUI() override {
-        auto* frame  = new tsl::elm::HeaderOverlayFrame();
-        auto* header = new tsl::elm::CustomDrawer(
-            [](tsl::gfx::Renderer* r, s32, s32, s32, s32) {
-                draw_wads_header(r, "Select a WAD");
-            });
-        frame->setHeader(header);
+        auto* frame = new DoomOverlayFrame("", "Configure");
         auto* list  = new tsl::elm::List();
 
         auto wads = scan_wads();
         if (wads.empty()) {
             list->addItem(new tsl::elm::ListItem("(no WADs found)"));
             list->addItem(new tsl::elm::ListItem("Put *.wad in:"));
-            list->addItem(new tsl::elm::ListItem("/switch/sx-doom-overlay/"));
+            list->addItem(new tsl::elm::ListItem(kWadDir));
         } else {
             for (const auto& wad : wads) {
                 auto* item = new tsl::elm::ListItem(wad.display_name, wad.filename);
                 std::string fullpath = wad.fullpath;
-                std::string display  = wad.display_name;
-                // Route through LevelPickerGui so the user can choose to
-                // boot at the title screen OR warp directly to a level.
-                item->setClickListener([fullpath, display](u64 keys) -> bool {
+                item->setClickListener([fullpath](u64 keys) -> bool {
                     if (keys & HidNpadButton_A) {
-                        tsl::changeTo<LevelPickerGui>(fullpath, display);
+                        tsl::changeTo<DoomGui>(fullpath);
                         return true;
                     }
                     return false;
@@ -644,298 +637,78 @@ class WadPickerGui final : public tsl::Gui {
                 list->addItem(item);
             }
         }
-
-        // Settings + Quit at the bottom of the picker. Settings opens the
-        // SettingsGui (read-only status for now). Quit closes the overlay.
-        auto* settings_item = new tsl::elm::ListItem("Settings");
-        settings_item->setClickListener([](u64 keys) -> bool {
-            if (keys & HidNpadButton_A) {
-                tsl::changeTo<SettingsGui>();
-                return true;
-            }
-            return false;
-        });
-        list->addItem(settings_item);
-
-        auto* quit_item = new tsl::elm::ListItem("Quit Overlay");
-        quit_item->setClickListener([](u64 keys) -> bool {
-            if (keys & HidNpadButton_A) {
-                tsl::Overlay::get()->close();
-                return true;
-            }
-            return false;
-        });
-        list->addItem(quit_item);
-
         frame->setContent(list);
         return frame;
     }
+
+    bool handleInput(u64 keysDown, u64, const HidTouchState&,
+                     HidAnalogStickState, HidAnalogStickState) override {
+        const bool simulatedNext = ult::simulatedNextPage.exchange(false, std::memory_order_acq_rel);
+        if (simulatedNext || (keysDown & HidNpadButton_Right)) {
+            tsl::changeTo<ConfigGui>();
+            return true;
+        }
+        return false;
+    }
 };
 
-// Helper: render the ULTRAWADS gradient logo + a subtitle. Used by the WAD
-// picker and Controls help screens to match the in-game header style.
-// Per-letter color interpolated red → yellow across 9 letters.
-//
-// Geometry matches libtesla's standard OverlayFrame title (tesla.hpp:4956):
-// fontSize=32, x=20, y=50 — so users with libtesla muscle memory know where
-// to look. Subtitle below at y=72 follows libtesla's subtitleY = y + 25 form.
-void draw_wads_header(tsl::gfx::Renderer* renderer, const char* subtitle) {
-    const char* const word = "ULTRAWADS";       // 9 letters
-    constexpr int     kCount    = 9;
-    constexpr int     kFontSize = 32;            // matches libtesla native title
-    constexpr int     kStride   = 26;            // a touch tight for that font, gives the title weight
-    const tsl::Color  shadow(0xF002);
+// draw_doom_title — full-logo dynamic wave animation with Doom fire colors.
+//   All 4 letters of "DOOM" get a staggered sine wave.
+//   Dynamic: wave between doomRGB2 (blood red) and doomRGB1 (fire orange-red).
+//   Static:  all letters in doomRGB1 (bright fire red).
+static s32 __attribute__((optimize("O3"))) draw_doom_title(tsl::gfx::Renderer* renderer,
+                                const s32 x, const s32 y, const u32 fontSize) {
+    static const tsl::Color doomRGB1 = tsl::RGB888("D7BB43");  // gold
+    static const tsl::Color doomRGB2 = tsl::RGB888("0000FF");  // blue
 
-    int lx = 20;
-    for (int i = 0; i < kCount; ++i) {
-        // Gradient: G channel rises from 0 (red) to F (yellow) across the word.
-        // ABGR4444: A=F, B=0, G=0..F, R=F.
-        const u8 g4 = static_cast<u8>((i * 15) / (kCount - 1));
-        const tsl::Color c(static_cast<u16>(0xF000 | (g4 << 4) | 0x000F));
-        char one[2] = { word[i], '\0' };
-        renderer->drawString(one, false, lx + 1, 51, kFontSize, shadow);
-        renderer->drawString(one, false, lx,     50, kFontSize, c);
-        lx += kStride;
-    }
-    if (subtitle && *subtitle) {
-        renderer->drawString(subtitle, false, 20, 75, 15, tsl::Color(0xF888));
-    }
-}
+    static constexpr const char kTitle[] = "DOOM";
 
-// ===== Out-of-line method bodies (cross-class refs need complete types) =====
+    char buf[2] = {0, 0};
+    s32 cx = x;
 
-void action_change_wad() {
-    // Engine can't switch WADs in-process (doomgeneric_Create allocates the
-    // zone once, loads lumps, registers atexit handlers — calling it again
-    // would leak/fail). To pick a new WAD the user closes + reopens, getting
-    // a fresh process that re-runs the WAD picker. So this action is
-    // functionally equivalent to action_quit_overlay; kept around so picker
-    // ListItems can call it semantically.
-    doom_trace("change WAD requested — closing overlay; reopen to pick new WAD");
-    tsl::Overlay::get()->close();
-}
-
-void action_show_controls() {
-    doom_trace("touch button: Show Controls");
-    tsl::changeTo<ControlsHelpGui>();
-}
-
-void action_quit_overlay() {
-    doom_trace("touch button: Quit Overlay");
-    tsl::Overlay::get()->close();
-}
-
-bool DoomGui::handleInput(u64 keysDown, u64 keysHeld, const HidTouchState& touchPos,
-                          HidAnalogStickState /*leftStick*/, HidAnalogStickState /*rightStick*/) {
-    // libtesla's Gui::handleInput doesn't receive keysUp directly — derive
-    // from the prev-keysHeld delta (same pattern libtesla uses internally
-    // at tesla.hpp:8482-8483).
-    const u64 keysUp = m_prevKeysHeld & ~keysHeld;
-    m_prevKeysHeld = keysHeld;
-
-    // Quit combo: hold Plus, tap Minus. Two-button intentional combo, hard
-    // to fire by accident. Engine state is abandoned (no save) — reopening
-    // shows the WAD picker fresh.
-    if ((keysHeld & HidNpadButton_Plus) && (keysDown & HidNpadButton_Minus)) {
-        doom_trace("quit combo (Plus+Minus) — closing overlay");
-        tsl::Overlay::get()->close();
-        return true;
-    }
-
-    // Touch buttons — edge-detect on tap (transition no-touch → touch).
-    // libtesla zeroes touchPos when no finger is down, so any nonzero
-    // coordinate counts as "touched."
-    const bool now_touched = (touchPos.x != 0) || (touchPos.y != 0);
-    if (now_touched && !m_prevTouched) {
-        const int tx = static_cast<int>(touchPos.x);
-        const int ty = static_cast<int>(touchPos.y);
-        for (int i = 0; i < kOverlayButtonCount; ++i) {
-            const auto& b = kOverlayButtons[i];
-            if (tx >= b.x && tx < b.x + b.w &&
-                ty >= b.y && ty < b.y + b.h) {
-                if (b.action) b.action();
-                m_prevTouched = now_touched;
-                return true;
-            }
+    if (ult::useDynamicLogo) {
+        static constexpr double kTwoPi = 2.0 * ult::_M_PI;
+        const double t = ult::nowNs() / 1e9;
+        float countOffset = 0.f;
+        for (const char ch : kTitle) {
+            if (ch == '\0') break;
+            const float counter = static_cast<float>(kTwoPi) *
+                                  static_cast<float>(std::fmod(t / 4.0 + countOffset, 2.0)) / 2.0f;
+            const float tp = ult::cos(3.0f * (counter - static_cast<float>(kTwoPi) / 3.0f));
+            const float bl = (tp + 1.0f) / 2.0f;
+            const tsl::Color col = {
+                static_cast<u8>((doomRGB1.r - doomRGB2.r) * bl + doomRGB2.r),
+                static_cast<u8>((doomRGB1.g - doomRGB2.g) * bl + doomRGB2.g),
+                static_cast<u8>((doomRGB1.b - doomRGB2.b) * bl + doomRGB2.b),
+                0xF
+            };
+            buf[0] = ch;
+            cx += renderer->drawString(buf, false, cx, y, fontSize, col).first;
+            countOffset -= 0.2f;
         }
+    } else {
+        cx += renderer->drawString(kTitle, false, cx, y, fontSize, doomRGB1).first;
     }
-    m_prevTouched = now_touched;
-
-    // Only forward inputs to the engine if Doom actually loaded; the
-    // loading and error screens shouldn't accept gameplay input.
-    if (g_doom_initialized && !g_doom_failed) {
-        doom_input::dispatch(keysDown, keysUp);
-    }
-
-    // Return true so libtesla considers the input "handled" and doesn't
-    // route it back to its menu logic (which would close the overlay
-    // unexpectedly on B/+/etc.).
-    return true;
-}
-
-tsl::elm::Element* LevelPickerGui::createUI() {
-    auto* frame  = new tsl::elm::HeaderOverlayFrame();
-    auto* header = new tsl::elm::CustomDrawer(
-        [](tsl::gfx::Renderer* r, s32, s32, s32, s32) {
-            draw_wads_header(r, "Pick Level");
-        });
-    frame->setHeader(header);
-    auto* list   = new tsl::elm::List();
-
-    const std::string wad_path = m_wadPath;
-    const std::string wad_disp = m_wadDisplayName;
-
-    // Default: no warp, title screen + attract demo
-    {
-        auto* item = new tsl::elm::ListItem("Title Screen", "boot normal");
-        item->setClickListener([wad_path, wad_disp](u64 keys) -> bool {
-            if (keys & HidNpadButton_A) {
-                tsl::changeTo<DoomGui>(wad_path, wad_disp, 0, 0);
-                return true;
-            }
-            return false;
-        });
-        list->addItem(item);
-    }
-
-    // Doom 1 / Chex / Freedoom 1 / Heretic style: 4 episodes × 9 maps.
-    // We list ALL 36 — engines silently fall back to E1M1 if a level isn't
-    // present in the loaded WAD, so it's safe to over-list.
-    for (int ep = 1; ep <= 4; ++ep) {
-        for (int mp = 1; mp <= 9; ++mp) {
-            char label[16];
-            std::snprintf(label, sizeof(label), "E%dM%d", ep, mp);
-            auto* item = new tsl::elm::ListItem(label);
-            const int e = ep, m = mp;
-            item->setClickListener([wad_path, wad_disp, e, m](u64 keys) -> bool {
-                if (keys & HidNpadButton_A) {
-                    tsl::changeTo<DoomGui>(wad_path, wad_disp, e, m);
-                    return true;
-                }
-                return false;
-            });
-            list->addItem(item);
-        }
-    }
-
-    // Doom 2 style: MAP01..MAP32 (we map MAP01..MAP09 onto -warp 1, episode
-    // ignored; chocolate-doom interprets -warp <map> as MAP## for Doom 2).
-    // For consistency we still pass episode=1 and use map number directly.
-    for (int mp = 1; mp <= 32; ++mp) {
-        char label[16];
-        std::snprintf(label, sizeof(label), "MAP%02d", mp);
-        auto* item = new tsl::elm::ListItem(label, "Doom 2 style");
-        const int m = mp;
-        item->setClickListener([wad_path, wad_disp, m](u64 keys) -> bool {
-            if (keys & HidNpadButton_A) {
-                // For Doom 2, -warp uses one number (the map). The engine
-                // accepts both forms; episode arg ignored when WAD is Doom 2.
-                tsl::changeTo<DoomGui>(wad_path, wad_disp, 1, m);
-                return true;
-            }
-            return false;
-        });
-        list->addItem(item);
-    }
-
-    frame->setContent(list);
-    return frame;
-}
-
-tsl::elm::Element* SettingsGui::createUI() {
-    auto* frame  = new tsl::elm::HeaderOverlayFrame();
-    auto* header = new tsl::elm::CustomDrawer(
-        [](tsl::gfx::Renderer* r, s32, s32, s32, s32) {
-            draw_wads_header(r, "Settings");
-        });
-    frame->setHeader(header);
-    auto* list  = new tsl::elm::List();
-    // Status read-out for now (real toggles come once the underlying systems
-    // they control are working — audio is blocked, render scale needs swizzle
-    // replacement). Left intentionally simple.
-    list->addItem(new tsl::elm::ListItem("Engine",        "doomgeneric (chocolate-doom fork)"));
-    list->addItem(new tsl::elm::ListItem("Doom zone",     "4 MiB (-mb 4)"));
-    list->addItem(new tsl::elm::ListItem("Render scale",  "1.4x nearest-neighbor"));
-    list->addItem(new tsl::elm::ListItem("Turn rate",     "1024 BAM/tic (patches/0003)"));
-    list->addItem(new tsl::elm::ListItem("Audio",         "SFX 22050 Hz / 8 ch (no music)"));
-    list->addItem(new tsl::elm::ListItem("Save format",   "per-WAD slots (patches/0006)"));
-    list->addItem(new tsl::elm::ListItem("Quit handling", "I_Quit longjmps cleanly (patches/0002+0005)"));
-    frame->setContent(list);
-    return frame;
-}
-
-tsl::elm::Element* ControlsHelpGui::createUI() {
-    auto* frame  = new tsl::elm::HeaderOverlayFrame();
-    auto* header = new tsl::elm::CustomDrawer(
-        [](tsl::gfx::Renderer* r, s32, s32, s32, s32) {
-            draw_wads_header(r, "Controls");
-        });
-    frame->setHeader(header);
-    auto* list  = new tsl::elm::List();
-    // Single-arg ListItems (text only, no right-aligned value field). The
-    // two-arg form was triggering a font cache crash under audio-backend
-    // heap pressure (stbtt__csctx_rccurve_to in libtesla); single-arg uses
-    // a simpler render path that survives the tighter memory budget.
-    list->addItem(new tsl::elm::ListItem("L-stick: move + strafe"));
-    list->addItem(new tsl::elm::ListItem("R-stick: turn left/right"));
-    list->addItem(new tsl::elm::ListItem("D-pad: arrows / menu nav"));
-    list->addItem(new tsl::elm::ListItem("ZR: FIRE (primary)"));
-    list->addItem(new tsl::elm::ListItem("ZL: RUN (hold)"));
-    list->addItem(new tsl::elm::ListItem("A: USE / menu select"));
-    list->addItem(new tsl::elm::ListItem("B: alt FIRE / menu back"));
-    list->addItem(new tsl::elm::ListItem("X: toggle automap"));
-    list->addItem(new tsl::elm::ListItem("L bumper: prev weapon"));
-    list->addItem(new tsl::elm::ListItem("R bumper: next weapon"));
-    list->addItem(new tsl::elm::ListItem("Plus: in-game menu"));
-    list->addItem(new tsl::elm::ListItem("Plus + Minus: quit overlay"));
-    frame->setContent(list);
-    return frame;
+    return cx;
 }
 
 class DoomOverlay final : public tsl::Overlay {
-   public:
+public:
     void initServices() override {
-        if (R_SUCCEEDED(psmInitialize())) {
-            g_sys_status.psm_ready = true;
-        }
+        mkdir("sdmc:/config", 0777);
+        mkdir(kConfigDir, 0777);   // ensure dir exists before load or save
+        load_config();
 
-        // Heap-tier gate. Ethan's targets: stock 4 MB → silent; 6 MB+ → audio.
-        // envGetHeapOverrideSize is the overlay's pool ceiling (Ultrahand's
-        // "Overlay Memory" slider). Below ~5 MB we skip audio init entirely:
-        //   - audio_backend buffers + ring  ≈ 28 KB
-        //   - OPL2 chip + queue + scratch   ≈ 20 KB
-        //   - SFX cache cap                 ≤ 192 KB
-        //   - active MIDI buffer            ≤  96 KB
-        // Plus Doom's 4 MiB zone + libtesla overhead — pool needs ~5.5 MB
-        // working room before audio is safe to enable.
-        const u64 pool_bytes = envGetHeapOverrideSize();
-        const u64 AUDIO_MIN_POOL_BYTES = 5ULL * 1024 * 1024;  // 5 MB
-        if (pool_bytes != 0 && pool_bytes < AUDIO_MIN_POOL_BYTES) {
-            char buf[96];
-            std::snprintf(buf, sizeof(buf),
-                          "audio: skipped — pool %llu KB < %llu KB threshold",
-                          (unsigned long long)(pool_bytes / 1024),
-                          (unsigned long long)(AUDIO_MIN_POOL_BYTES / 1024));
-            doom_trace(buf);
-            switch_audio_set_backend(nullptr);
-            return;
-        }
-
-        // Audio backend MUST init here (initServices), not later. We
-        // experimentally moved this to after doomgeneric_Create; the drain
-        // thread immediately crashed in audoutWaitPlayFinish with a NULL
-        // service handle (Result 2168-0002). libtesla's ult::Audio attach
-        // is only stable during the initServices window — by the time the
-        // user has navigated through GUIs and picked a WAD, audout's state
-        // has shifted and our late-bind hits a half-torn-down session.
+        // Audio backend MUST init here (initServices), not later. Audout's
+        // state shifts by the time the user has navigated GUIs — late-bind
+        // hits a half-torn-down session. Same constraint as sx-doom-overlay.
         const audio_backend_status_t st =
             audio_backend_init(NULL, &g_audio_backend);
-        char buf[96];
+        char buf[80];
         std::snprintf(buf, sizeof(buf),
-                      "audio_backend_init -> %d (be=%p) pool=%lluKB",
+                      "audio_backend_init -> %d (be=%p)",
                       static_cast<int>(st),
-                      static_cast<void*>(g_audio_backend),
-                      (unsigned long long)(pool_bytes / 1024));
+                      static_cast<void*>(g_audio_backend));
         doom_trace(buf);
         switch_audio_set_backend(g_audio_backend);
     }
@@ -943,28 +716,18 @@ class DoomOverlay final : public tsl::Overlay {
     void exitServices() override {
         if (g_audio_backend) {
             // Stop publishing first so any late engine tic finds NULL and
-            // skips submit, instead of pushing into a freed backend.
+            // skips submit instead of pushing into a freed backend.
             switch_audio_set_backend(nullptr);
             audio_backend_shutdown(g_audio_backend);
             g_audio_backend = nullptr;
         }
-        if (g_sys_status.psm_ready) {
-            psmExit();
-            g_sys_status.psm_ready = false;
-        }
     }
 
     void onShow() override {
-        // Re-anchor the engine clock so the resumed simulation doesn't
-        // see a giant elapsed-time jump from the time we were dismissed.
         doomgeneric_switch_reanchor_clock();
     }
 
-    void onHide() override {
-        // Pause-on-dismiss: just stop calling update(). Engine state
-        // stays in memory; resumes on onShow + next update() call.
-        // Audio pause will be added in Task 9.
-    }
+    void onHide() override {}
 
     std::unique_ptr<tsl::Gui> loadInitialGui() override {
         return std::make_unique<WadPickerGui>();

@@ -71,9 +71,16 @@ CFLAGS  += $(INCLUDE) -D__SWITCH__
 #   SWITCH_SOUND             : enables our DG_sound_module / DG_music_module in
 #                              i_sound.c without dragging FEATURE_SOUND's
 #                              SDL_mixer.h include (see patches/0008)
+#   USING_WIDGET_DIRECTIVE   : libtesla draws the user's Ultrahand-configured
+#                              sysmon widget (clock / battery / CPU stats) in
+#                              the top-right of our overlay. Without this,
+#                              opening our Doom overlay makes the widget
+#                              vanish (visual inconsistency with every other
+#                              libtesla overlay). With it, our overlay matches
+#                              the rest of the user's overlay collection.
 CFLAGS  += -DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 \
            -DUSE_EXCEPTION_WRAP=1 -DNORMALUNIX -DLINUX \
-           -DSWITCH_SOUND
+           -DSWITCH_SOUND -DUSING_WIDGET_DIRECTIVE
 
 # Doomgeneric warnings we accept (pre-existing in upstream, not regressions
 # we want to fail the build on)
