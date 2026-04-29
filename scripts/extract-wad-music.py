@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Extract music from a Doom WAD as MIDI files, optionally rendering to OGG.
+"""Extract music from Doom WADs as MIDI files, optionally rendering to OGG.
 
-Standalone — no pip dependencies. Reads the WAD directly, converts any MUS
+Standalone — no pip dependencies. Reads each WAD directly, converts any MUS
 lumps to MIDI in-process, then (if fluidsynth + ffmpeg + a SoundFont are
 available) renders each MIDI to OGG so you can drop them straight into
 sdmc:/switch/sx-doom-overlay/music/ for the OGG branch.
 
+Default layout (run from project root with no args):
+    Input:  data/wads/*.wad           — drop your CHEX.WAD, DOOM.WAD, etc here
+    Output: data/music/<wad-stem>/    — per-WAD subdir keeps lump names from
+                                         colliding across packs
+
 Usage:
-    extract-wad-music.py CHEX.WAD
-    extract-wad-music.py CHEX.WAD -o out/ --sf2 ~/sf2/SC-55.sf2
+    extract-wad-music.py                            # scan data/wads/, no SF2
+    extract-wad-music.py --sf2 ~/sf2/SC-55.sf2      # full pipeline (recommended)
+    extract-wad-music.py path/to/CHEX.WAD           # single WAD
+    extract-wad-music.py some/dir/                  # scan an arbitrary dir
 
 Tools needed for the OGG render step (optional):
     fluidsynth   apt: fluidsynth   |   brew: fluid-synth   |   choco: fluidsynth
@@ -266,12 +273,63 @@ def render_to_ogg(midi_path: Path, sf2: Path, ogg_path: Path,
         return False
 
 
+def process_wad(wad: Path, outdir: Path, sf2: Path | None,
+                gain: float, oggq: int, do_ogg: bool,
+                keep_mus: bool, keep_wav: bool, keep_mid: bool) -> tuple[int, int, int, int]:
+    """Extract music from one WAD into outdir. Returns (mus, mid, skipped, ogg)."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    print(f"=== {wad.name} → {outdir}/ ===")
+
+    n_mus, n_mid, n_skip, n_ogg = 0, 0, 0, 0
+    for name, data in read_wad_lumps(wad):
+        base = name.lower()
+        if data[:4] == b"MUS\x1a":
+            midi = mus_to_midi(data)
+            if midi is None:
+                print(f"  skip {name}: MUS parse failed", file=sys.stderr)
+                n_skip += 1
+                continue
+            if keep_mus:
+                (outdir / f"{base}.mus").write_bytes(data)
+            n_mus += 1
+        elif data[:4] == b"MThd":
+            midi = data
+            n_mid += 1
+        else:
+            print(f"  skip {name}: unknown format ({data[:4]!r})", file=sys.stderr)
+            n_skip += 1
+            continue
+
+        midi_path = outdir / f"{base}.mid"
+        midi_path.write_bytes(midi)
+
+        if do_ogg and sf2 is not None:
+            ogg_path = outdir / f"{base}.ogg"
+            ok = render_to_ogg(midi_path, sf2, ogg_path, keep_wav, gain, oggq)
+            if ok:
+                n_ogg += 1
+                print(f"  {base:<12} → {ogg_path.name}")
+                if not keep_mid:
+                    midi_path.unlink(missing_ok=True)
+            else:
+                print(f"  {base:<12} → {midi_path.name} (OGG render failed)")
+        else:
+            print(f"  {base:<12} → {midi_path.name}")
+    return n_mus, n_mid, n_skip, n_ogg
+
+
 def main() -> int:
+    project_root = Path(__file__).resolve().parent.parent
+    default_input = project_root / "data" / "wads"
+    default_output = project_root / "data" / "music"
+
     ap = argparse.ArgumentParser(
-        description="Extract music from a Doom WAD as MIDI/OGG.")
-    ap.add_argument("wad", type=Path, help="path to .wad file")
-    ap.add_argument("-o", "--outdir", type=Path,
-                    help="output directory (default: <wad-stem>-music/)")
+        description="Extract music from Doom WADs as MIDI/OGG.")
+    ap.add_argument("wad", type=Path, nargs="?", default=default_input,
+                    help=f"WAD file or directory of .wads (default: {default_input.relative_to(project_root)}/)")
+    ap.add_argument("-o", "--outdir", type=Path, default=default_output,
+                    help=f"output root (default: {default_output.relative_to(project_root)}/); "
+                         f"each WAD lands in <outdir>/<wad-stem>/")
     ap.add_argument("--sf2", type=Path, default=None,
                     help="SoundFont for OGG render (omit to stop after MIDI)")
     ap.add_argument("--gain", type=float, default=0.6,
@@ -288,67 +346,49 @@ def main() -> int:
 
     if not args.wad.exists():
         print(f"error: {args.wad} not found", file=sys.stderr)
+        if args.wad == default_input:
+            print(f"hint: drop your WAD files into {default_input.relative_to(project_root)}/", file=sys.stderr)
         return 1
 
-    outdir = args.outdir or args.wad.parent / f"{args.wad.stem.lower()}-music"
-    outdir.mkdir(parents=True, exist_ok=True)
+    if args.wad.is_dir():
+        wads = sorted(p for p in args.wad.iterdir() if p.suffix.lower() == ".wad")
+        if not wads:
+            print(f"error: no .wad files in {args.wad}/", file=sys.stderr)
+            return 1
+    else:
+        wads = [args.wad]
 
     have_fs = args.sf2 is not None and args.sf2.exists() and shutil.which("fluidsynth")
     have_ff = shutil.which("ffmpeg") is not None
     if args.sf2 and not have_fs:
-        print(f"warn: --sf2 given but fluidsynth/SoundFont missing — MIDI only",
+        print("warn: --sf2 given but fluidsynth/SoundFont missing — MIDI only",
               file=sys.stderr)
     if have_fs and not have_ff:
-        print(f"warn: ffmpeg missing — leaving WAVs, no OGG encode",
+        print("warn: ffmpeg missing — leaving WAVs, no OGG encode",
               file=sys.stderr)
-    do_ogg = have_fs and have_ff
+    do_ogg = bool(have_fs and have_ff)
 
-    print(f"WAD: {args.wad}")
-    print(f"Out: {outdir}/")
     print(f"Pipeline: WAD → MIDI{' → WAV → OGG' if do_ogg else ''}")
+    print(f"WADs: {len(wads)}")
+    if not do_ogg and args.sf2 is None:
+        print("(no --sf2 — emitting MIDI only; pass --sf2 path/to/font.sf2 for OGG)")
     print()
 
-    n_mus, n_mid, n_skip, n_ogg = 0, 0, 0, 0
-    for name, data in read_wad_lumps(args.wad):
-        base = name.lower()
-        if data[:4] == b"MUS\x1a":
-            midi = mus_to_midi(data)
-            if midi is None:
-                print(f"  skip {name}: MUS parse failed", file=sys.stderr)
-                n_skip += 1
-                continue
-            if args.keep_mus:
-                (outdir / f"{base}.mus").write_bytes(data)
-            n_mus += 1
-        elif data[:4] == b"MThd":
-            midi = data
-            n_mid += 1
-        else:
-            print(f"  skip {name}: unknown format ({data[:4]!r})", file=sys.stderr)
-            n_skip += 1
-            continue
-
-        midi_path = outdir / f"{base}.mid"
-        midi_path.write_bytes(midi)
-
-        if do_ogg:
-            ogg_path = outdir / f"{base}.ogg"
-            ok = render_to_ogg(midi_path, args.sf2, ogg_path,
-                               args.keep_wav, args.gain, args.ogg_quality)
-            if ok:
-                n_ogg += 1
-                print(f"  {base:<12} → {ogg_path.name}")
-                if not args.keep_mid:
-                    midi_path.unlink(missing_ok=True)
-            else:
-                print(f"  {base:<12} → {midi_path.name} (OGG render failed)")
-        else:
-            print(f"  {base:<12} → {midi_path.name}")
+    totals = [0, 0, 0, 0]
+    for wad in wads:
+        per_wad_outdir = args.outdir / wad.stem.lower()
+        n = process_wad(wad, per_wad_outdir, args.sf2,
+                        args.gain, args.ogg_quality, do_ogg,
+                        args.keep_mus, args.keep_wav, args.keep_mid)
+        for i, v in enumerate(n):
+            totals[i] += v
 
     print()
-    print(f"Done: {n_mus} MUS converted, {n_mid} MIDI passed through, "
-          f"{n_skip} skipped, {n_ogg} OGG rendered")
-    print(f"Drop the .ogg files into sdmc:/switch/sx-doom-overlay/music/ on the SD card")
+    print(f"Total: {totals[0]} MUS converted, {totals[1]} MIDI passed through, "
+          f"{totals[2]} skipped, {totals[3]} OGG rendered")
+    if do_ogg:
+        print(f"Copy {args.outdir.relative_to(project_root)}/<wad>/*.ogg into "
+              f"sdmc:/switch/sx-doom-overlay/music/ on the SD card")
     return 0
 
 

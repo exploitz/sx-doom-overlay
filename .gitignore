@@ -18,9 +18,17 @@ dist/
 # Patch sentinel — produced by `make patches`, blown away on `make clean`
 lib/doomgeneric/.patched
 
-# Bundled WAD — copied into release zip from data/, but not tracked in git
-data/freedoom1.wad
-data/*.wad
+# WAD files — copyrighted (DOOM, CHEX) or BSD-3 (Freedoom). Drop your own
+# copies into data/wads/. Not tracked in git. The .gitkeep keeps the dir.
+data/wads/*.wad
+!data/wads/.gitkeep
+
+# Music pack — third-party recordings (Brandon Blume Roland SC-55 pack,
+# Arachnosoft Chex pack) or script-rendered output from
+# scripts/extract-wad-music.py. Not tracked.
+data/music/**
+!data/music/.gitkeep
+data/test.ogg
 
 # Desktop test outputs
 tests/desktop/out/

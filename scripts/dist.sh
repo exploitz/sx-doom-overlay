@@ -29,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 OVL_PATH="$ROOT/out/sx-doom-overlay.ovl"
-WAD_PATH="$ROOT/data/freedoom1.wad"
+WAD_PATH="$ROOT/data/wads/freedoom1.wad"
 LICENSE_PATH="$ROOT/data/LICENSE.freedoom"
 README_PATH="$ROOT/README.md"
 
