@@ -58,9 +58,10 @@ public:
         // --- Animated "DOOM" title — Tetris-style baseline y=68 ---
         draw_doom_title(renderer, 20, 68, 42);
 
-        // --- Version: APP_VERSION only, hardcoded x=183 matching Tetris ---
-        static const std::string versionLabel = ult::cleanVersionLabel(APP_VERSION);
-        renderer->drawString(versionLabel.c_str(), false, 183, 60, 15, tsl::bannerVersionTextColor);
+        // --- Version: raw APP_VERSION (git branch@hash[+]) at top header.
+        // We bypass ult::cleanVersionLabel here because it strips everything
+        // that isn't a digit/dot/plus, which mangles "main@b2a0fb6+" to "2".
+        renderer->drawString(APP_VERSION, false, 183, 60, 15, tsl::bannerVersionTextColor);
 
         if (m_footerHidden) {
             if (m_contentElement != nullptr) m_contentElement->frame(renderer);
