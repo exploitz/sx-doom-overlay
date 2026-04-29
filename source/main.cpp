@@ -298,6 +298,25 @@ public:
     }
 };
 
+// Bottom-row action buttons — positioned exactly where the WAD picker's
+// footer renders ("B Back  A OK"), reusing the same y baseline + height
+// (73 px) and corner radius (12.0f) so the look is libtesla-native.
+//
+// The frame's own footer is hidden during gameplay (m_footerHidden=true),
+// so this 73-px band is free for our touch actions.
+constexpr int kFooterY      = 720 - 73;            // 647 — top of footer band
+constexpr int kFooterH      = 73;                  // libtesla standard
+constexpr int kFooterTextY  = 693;                 // matches DoomOverlayFrame
+constexpr int kFooterFont   = 23;                  // matches DoomOverlayFrame
+
+// Three evenly-spaced touch zones across the 448 px width. ~10 px gaps.
+constexpr int kBtnSaveX = 30;
+constexpr int kBtnSaveW = 122;
+constexpr int kBtnLoadX = 162;
+constexpr int kBtnLoadW = 122;
+constexpr int kBtnQuitX = 294;
+constexpr int kBtnQuitW = 122;
+
 // Helpers used by the Save/Load/Quit ListItem click listeners.
 namespace doom_actions {
 
@@ -410,6 +429,76 @@ inline void draw_doom_viewport(tsl::gfx::Renderer* renderer,
     }
 }
 
+// Single content element for the Doom GUI: game viewport + bottom-row
+// action buttons. The buttons render in libtesla-footer style — same
+// y baseline (693), same font size (23 pt), same corner radius (12 px),
+// same colors (a(tsl::clickColor) highlight, a(tsl::bottomTextColor)
+// text) as Ethan's WAD picker footer ("B Back  A OK"). Touch-only:
+// idle state shows just the label; press shows the rounded-rect
+// highlight; release-in-bounds fires the action; drag-out cancels.
+class DoomElement final : public tsl::elm::Element {
+public:
+    void draw(tsl::gfx::Renderer* renderer) override {
+        // Game viewport + memory line.
+        draw_doom_viewport(renderer, getX(), getY(), getWidth(), getHeight());
+
+        if (!g_doom_initialized || g_doom_failed) return;
+
+        // Footer-style row at y=647..720. Three buttons:
+        //   Save State  /  Load State  /  Quit
+        auto draw_btn = [&](int x, int w, const char* label, bool pressed) {
+            if (pressed) {
+                renderer->drawRoundedRect(static_cast<float>(x),
+                                          static_cast<float>(kFooterY),
+                                          static_cast<float>(w),
+                                          static_cast<float>(kFooterH),
+                                          12.f, a(tsl::clickColor));
+            }
+            const auto td = renderer->getTextDimensions(label, false, kFooterFont);
+            const int tx = x + (w - static_cast<int>(td.first)) / 2;
+            renderer->drawString(label, false, tx, kFooterTextY,
+                                 kFooterFont, a(tsl::bottomTextColor));
+        };
+        draw_btn(kBtnSaveX, kBtnSaveW, "Save State", m_btnPressed == 1);
+        draw_btn(kBtnLoadX, kBtnLoadW, "Load State", m_btnPressed == 2);
+        draw_btn(kBtnQuitX, kBtnQuitW, "Quit",       m_btnPressed == 3);
+    }
+
+    void layout(u16, u16, u16, u16) override {}
+
+    bool handleInput(u64, u64, const HidTouchState&,
+                     HidAnalogStickState, HidAnalogStickState) override {
+        return false;
+    }
+
+    bool onTouch(tsl::elm::TouchEvent event,
+                 s32 currX, s32 currY,
+                 s32 prevX, s32 prevY,
+                 s32 initialX, s32 initialY) override {
+        (void)prevX; (void)prevY; (void)initialX; (void)initialY;
+        auto inBtn = [&](int x, int w) {
+            return currX >= x && currX < x + w &&
+                   currY >= kFooterY && currY < kFooterY + kFooterH;
+        };
+        if (event == tsl::elm::TouchEvent::Touch) {
+            if      (inBtn(kBtnSaveX, kBtnSaveW)) { m_btnPressed = 1; return true; }
+            else if (inBtn(kBtnLoadX, kBtnLoadW)) { m_btnPressed = 2; return true; }
+            else if (inBtn(kBtnQuitX, kBtnQuitW)) { m_btnPressed = 3; return true; }
+        }
+        if (event == tsl::elm::TouchEvent::Release) {
+            const int hit = m_btnPressed;
+            m_btnPressed = 0;
+            if (hit == 1 && inBtn(kBtnSaveX, kBtnSaveW)) { doom_actions::save_state();   return true; }
+            if (hit == 2 && inBtn(kBtnLoadX, kBtnLoadW)) { doom_actions::load_state();   return true; }
+            if (hit == 3 && inBtn(kBtnQuitX, kBtnQuitW)) { doom_actions::quit_overlay(); return true; }
+        }
+        return false;
+    }
+
+private:
+    int m_btnPressed = 0;  // 0=none, 1=Save, 2=Load, 3=Quit
+};
+
 
 class DoomGui final : public tsl::Gui {
 public:
@@ -421,50 +510,14 @@ public:
         tsl::disableHiding = true;   // combo must close (not hide) while game runs
         m_frame = new DoomOverlayFrame("", "Configure");
 
-        // Layout inside the frame is a libtesla List with:
-        //   1. CustomDrawer — non-interactive game viewport region. Renders
-        //      the Doom framebuffer + heap counter via draw_doom_viewport().
-        //   2. CategoryHeader "Actions" — visual divider, libtesla style.
-        //   3. ListItem "Save State" → quicksave to slot 0 (auto-confirm)
-        //   4. ListItem "Load State" → quickload from slot 0
-        //   5. ListItem "Quit"       → exit overlay (combo-style close)
-        //
-        // ListItems are libtesla's native button primitive — same render
-        // language as the WAD picker. Click listeners fire on touch AND
-        // on A button (when focused), so both touch and gamepad navigation
-        // work out of the box.
-        auto* list = new tsl::elm::List();
-
-        list->addItem(new tsl::elm::CustomDrawer(
-            [](tsl::gfx::Renderer* r, s32 x, s32 y, s32 w, s32 h) {
-                draw_doom_viewport(r, x, y, w, h);
-            }
-        ));
-
-        list->addItem(new tsl::elm::CategoryHeader("Actions"));
-
-        auto* save_item = new tsl::elm::ListItem("Save State");
-        save_item->setClickListener([](u64 keys) -> bool {
-            if (keys & HidNpadButton_A) { doom_actions::save_state(); return true; }
-            return false;
-        });
-        list->addItem(save_item);
-
-        auto* load_item = new tsl::elm::ListItem("Load State");
-        load_item->setClickListener([](u64 keys) -> bool {
-            if (keys & HidNpadButton_A) { doom_actions::load_state(); return true; }
-            return false;
-        });
-        list->addItem(load_item);
-
-        auto* quit_item = new tsl::elm::ListItem("Quit");
-        quit_item->setClickListener([](u64 keys) -> bool {
-            if (keys & HidNpadButton_A) { doom_actions::quit_overlay(); return true; }
-            return false;
-        });
-        list->addItem(quit_item);
-
-        m_frame->setContent(list);
+        // Single content element that draws the game viewport at the top
+        // and a libtesla-footer-style action row (Save State / Load State
+        // / Quit) at the bottom — same visual idiom as the WAD picker's
+        // "B Back  A OK" footer. The frame's own footer stays hidden
+        // (m_footerHidden=true set after engine init) so we can reuse the
+        // 73 px footer band for our touch actions.
+        m_doomElement = new DoomElement();
+        m_frame->setContent(m_doomElement);
         return m_frame;
     }
 
@@ -543,7 +596,8 @@ public:
 
 private:
     std::string       m_wadPath;
-    DoomOverlayFrame* m_frame       = nullptr;
+    DoomOverlayFrame* m_frame        = nullptr;
+    DoomElement*      m_doomElement  = nullptr;
     u64               m_prevKeysHeld = 0;
 };
 
