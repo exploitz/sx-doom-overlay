@@ -68,33 +68,17 @@ constexpr int kScaledH    = 336;                           // 448*(3/4) — corr
 constexpr int kDoomOffsetX = 0;    // edge-to-edge horizontally
 constexpr int kDoomOffsetY = 108;  // matches UltraGB VP_Y: 11px below header (activeHeaderHeight=97)
 
-// Bottom-of-overlay UI: heap counter + Save/Load/Quit buttons.
-// Game viewport ends at y = 108 + 336 = 444. Footer is hidden during gameplay
-// (DoomGui sets m_footerHidden=true). Free space below: y = 444..720 (276 px).
-//
-//   y = 470: heap counter text (single line, small font)
-//   y = 540: button row, 60 px tall, three buttons evenly spaced
-//
-// Buttons are touchable rectangles drawn via renderer->drawRoundedRect with
-// libtesla-style click highlight. Save → push KEY_F2 (opens Doom save menu),
-// Load → push KEY_F3 (load menu), Quit → tsl::Overlay::close().
-constexpr int kBtnY      = 540;
-constexpr int kBtnH      = 60;
-constexpr int kBtnW      = 120;
-constexpr int kBtnSaveX  = 30;
-constexpr int kBtnLoadX  = 164;
-constexpr int kBtnQuitX  = 298;
-
 // Doom F-keys (chocolate-doom doomkeys.h).
 //   F6 = quicksave to quickSaveSlot (silently overwrites if slot is set).
 //   F9 = quickload from quickSaveSlot.
-// Both show a "Y/N over your save?" prompt; we auto-confirm by pushing 'y'
-// immediately after the F-key — the engine processes the keypress queue
-// serially so 'y' arrives during the prompt and dismisses it. Net effect:
-// emulator-style savestate semantics on a single button press.
-constexpr unsigned char kDoomKeyF6 = 0x80 + 0x40;  // quicksave
-constexpr unsigned char kDoomKeyF9 = 0x80 + 0x43;  // quickload
-constexpr unsigned char kDoomKeyY  = 'y';          // auto-confirm prompts
+// Both show a "Y/N over your save?" prompt; we auto-confirm with KEY_ENTER
+// because m_controls.c:157 sets key_menu_confirm = 13 (ENTER), not 'y',
+// per the sx-doom-overlay-local patch. The engine processes the keypress
+// queue serially so ENTER arrives during the prompt and dismisses it.
+// Net effect: emulator-style savestate semantics on a single touch.
+constexpr unsigned char kDoomKeyF6     = 0x80 + 0x40;  // quicksave
+constexpr unsigned char kDoomKeyF9     = 0x80 + 0x43;  // quickload
+constexpr unsigned char kDoomKeyEnter  = 13;           // auto-confirm prompts
 
 // WAD directories. We accept BOTH locations during the integration window so
 // neither legacy installs nor RetroArch-style new installs break.
@@ -314,171 +298,117 @@ public:
     }
 };
 
-class DoomElement final : public tsl::elm::Element {
-public:
-    void draw(tsl::gfx::Renderer* renderer) override {
-        if (g_doom_failed) {
-            renderer->drawString("Engine init failed:", false, 20, 200, 22, tsl::Color(0xFFFF));
-            renderer->drawString(g_doom_error_msg,      false, 20, 240, 18, tsl::Color(0xFA0F));
-            return;
-        }
-        if (!g_doom_initialized) {
-            renderer->drawString("Loading...", false, 20, 200, 22, tsl::Color(0xFFFF));
-            return;
-        }
+// Helpers used by the Save/Load/Quit ListItem click listeners.
+namespace doom_actions {
 
-        if (palette_changed) {
-            doom_blit::build_palette_lut_from_argb_struct(
-                reinterpret_cast<const uint8_t*>(&colors[0]), g_palette_lut);
-            palette_changed = false;
-        }
+inline void save_state() {
+    // F6 → opens "Quicksave over slot 0?" prompt (quickSaveSlot pre-set to 0
+    // in try_init_engine). ENTER auto-confirms because m_controls.c:157 sets
+    // key_menu_confirm = 13 (ENTER) for controller users. Net effect:
+    // emulator-style one-touch save to per-WAD slot 0.
+    doom_trace("Save State: F6 + ENTER");
+    doomgeneric_switch_push_key(1, kDoomKeyF6);
+    doomgeneric_switch_push_key(0, kDoomKeyF6);
+    doomgeneric_switch_push_key(1, kDoomKeyEnter);
+    doomgeneric_switch_push_key(0, kDoomKeyEnter);
+}
 
-        // Scale 320x200 → 448x336 (fill-width, correct 4:3 Doom aspect).
-        // Nearest-neighbor: src_x = dx*320/448, src_y = dy*200/336.
-        // Integer division gives correct 0..319 / 0..199 range at all endpoints.
-        // Background already filled by DoomOverlayFrame::draw().
-        const std::uint8_t* src = reinterpret_cast<const std::uint8_t*>(DG_ScreenBuffer);
-        if (src) {
-            const bool doGrid = g_lcd_grid;
-            for (int dy = 0; dy < kScaledH; ++dy) {
-                const int sy = dy * kDoomH / kScaledH;
-                const std::uint8_t* srow = src + sy * kDoomW;
-                const int fy = kDoomOffsetY + dy;
-                const bool dimRow = doGrid && (dy % 2 == 1);
-                for (int dx = 0; dx < kScaledW; ++dx) {
-                    const int sx = dx * kDoomW / kScaledW;
-                    tsl::Color col(g_palette_lut[srow[sx]]);
-                    if (dimRow || (doGrid && (dx % 2 == 1))) {
-                        col = tsl::Color({u8(col.r >> 1), u8(col.g >> 1), u8(col.b >> 1), col.a});
-                    }
-                    renderer->setPixel(dx, fy, col);
+inline void load_state() {
+    // F9 + ENTER — quickload from slot 0, auto-confirm prompt.
+    doom_trace("Load State: F9 + ENTER");
+    doomgeneric_switch_push_key(1, kDoomKeyF9);
+    doomgeneric_switch_push_key(0, kDoomKeyF9);
+    doomgeneric_switch_push_key(1, kDoomKeyEnter);
+    doomgeneric_switch_push_key(0, kDoomKeyEnter);
+}
+
+inline void quit_overlay() {
+    // CRITICAL: set launchComboHasTriggered before close. Without it,
+    // libtesla's close path runs the "exit feedback sound" branch
+    // (tesla.hpp:13867) which conflicts with our audio backend teardown
+    // and crashes Atmosphère. Combo close sets this flag; the original
+    // sx-doom-overlay Quit button didn't, hence the combo-vs-button
+    // crash asymmetry the user noticed.
+    doom_trace("Quit: launch-combo-style close");
+    launchComboHasTriggered.store(true, std::memory_order_release);
+    tsl::Overlay::get()->close();
+}
+
+}  // namespace doom_actions
+
+// Game viewport rendering — extracted as a free function so we can drop it
+// into a tsl::elm::CustomDrawer (which gives us a non-interactive rendering
+// region inside a libtesla List, sized by the list).
+//
+// Draws either: failure message, "Loading…" placeholder, OR the scaled Doom
+// framebuffer (320×200 → 448×336 nearest-neighbor) followed by a one-line
+// memory counter (newlib + Doom Z_Malloc zone).
+inline void draw_doom_viewport(tsl::gfx::Renderer* renderer,
+                               s32 boundsX, s32 boundsY, s32 boundsW, s32 boundsH) {
+    (void)boundsX; (void)boundsW; (void)boundsH;
+
+    if (g_doom_failed) {
+        renderer->drawString("Engine init failed:", false, 20, boundsY + 60, 22, tsl::Color(0xFFFF));
+        renderer->drawString(g_doom_error_msg,      false, 20, boundsY + 100, 18, tsl::Color(0xFA0F));
+        return;
+    }
+    if (!g_doom_initialized) {
+        renderer->drawString("Loading...", false, 20, boundsY + 60, 22, tsl::Color(0xFFFF));
+        return;
+    }
+
+    if (palette_changed) {
+        doom_blit::build_palette_lut_from_argb_struct(
+            reinterpret_cast<const uint8_t*>(&colors[0]), g_palette_lut);
+        palette_changed = false;
+    }
+
+    // Scale 320x200 → 448x336 (fill-width, correct 4:3 Doom aspect).
+    // Background already filled by DoomOverlayFrame::draw().
+    const std::uint8_t* src = reinterpret_cast<const std::uint8_t*>(DG_ScreenBuffer);
+    if (src) {
+        const bool doGrid = g_lcd_grid;
+        for (int dy = 0; dy < kScaledH; ++dy) {
+            const int sy = dy * kDoomH / kScaledH;
+            const std::uint8_t* srow = src + sy * kDoomW;
+            const int fy = kDoomOffsetY + dy;
+            const bool dimRow = doGrid && (dy % 2 == 1);
+            for (int dx = 0; dx < kScaledW; ++dx) {
+                const int sx = dx * kDoomW / kScaledW;
+                tsl::Color col(g_palette_lut[srow[sx]]);
+                if (dimRow || (doGrid && (dx % 2 == 1))) {
+                    col = tsl::Color({u8(col.r >> 1), u8(col.g >> 1), u8(col.b >> 1), col.a});
                 }
+                renderer->setPixel(dx, fy, col);
             }
         }
-
-        // ── Memory counter (sampled once per second) ─────────────────────
-        // Two values matter:
-        //   - newlib heap: changes when our overlay code allocates/frees
-        //     (mostly static after init since Doom uses its own zone)
-        //   - Doom Z_Malloc zone: 4 MiB pre-allocated chunk where the engine
-        //     actually does most allocs during gameplay (lump cache, sound
-        //     cache, MIDI arena). This is what visibly fluctuates.
-        {
-            static u64 mem_last_sample_ns = 0;
-            static char mem_label[112] = "mem: …";
-            const u64 now_ns = armTicksToNs(armGetSystemTick());
-            if (now_ns - mem_last_sample_ns > 1'000'000'000ULL) {
-                mem_last_sample_ns = now_ns;
-                const struct mallinfo mi = mallinfo();
-                const size_t newlib_used_kb = static_cast<size_t>(mi.uordblks) / 1024;
-                const size_t newlib_free_kb = static_cast<size_t>(mi.fordblks) / 1024;
-                const size_t zone_free_kb   =
-                    g_doom_initialized
-                    ? static_cast<size_t>(Z_FreeMemory()) / 1024
-                    : 0;
-                std::snprintf(mem_label, sizeof(mem_label),
-                              "newlib: %zuk used / %zuk free   doom zone: %zuk free",
-                              newlib_used_kb, newlib_free_kb, zone_free_kb);
-            }
-            renderer->drawString(mem_label, false, 30, 470, 14,
-                                 tsl::Color(0xCFFF));
-        }
-
-        // ── Action buttons (libtesla footer style) ───────────────────────
-        // Match the visual language of DoomOverlayFrame's footer:
-        //   - idle:   text only, no background
-        //   - touch:  rounded-rect highlight using a(tsl::clickColor),
-        //             corner radius 12.0f
-        //   - font:   23 pt, tsl::bottomTextColor
-        // No controller-glyph prefix because these buttons are touch-only —
-        // the bumper L/R bindings handle the controller path separately.
-        auto draw_btn = [&](int x, const char* label, bool pressed) {
-            if (pressed) {
-                renderer->drawRoundedRect(static_cast<float>(x),
-                                          static_cast<float>(kBtnY),
-                                          static_cast<float>(kBtnW),
-                                          static_cast<float>(kBtnH),
-                                          12.f, a(tsl::clickColor));
-            }
-            const auto td = renderer->getTextDimensions(label, false, 23);
-            const int tx = x + (kBtnW - static_cast<int>(td.first)) / 2;
-            const int ty = kBtnY + (kBtnH + 18) / 2;
-            renderer->drawString(label, false, tx, ty, 23, a(tsl::bottomTextColor));
-        };
-        draw_btn(kBtnSaveX, "Save State", m_btnPressed == 1);
-        draw_btn(kBtnLoadX, "Load State", m_btnPressed == 2);
-        draw_btn(kBtnQuitX, "Quit",       m_btnPressed == 3);
     }
 
-    void layout(u16, u16, u16, u16) override {}
-
-    bool handleInput(u64, u64, const HidTouchState&,
-                     HidAnalogStickState, HidAnalogStickState) override {
-        return false;
-    }
-
-    bool onTouch(tsl::elm::TouchEvent event,
-                 s32 currX, s32 currY,
-                 s32 prevX, s32 prevY,
-                 s32 initialX, s32 initialY) override {
-        (void)prevX; (void)prevY; (void)initialX; (void)initialY;
-        auto inBtn = [&](int x) {
-            return currX >= x && currX < x + kBtnW &&
-                   currY >= kBtnY && currY < kBtnY + kBtnH;
-        };
-        // Press: latch which button is being held for visual highlight.
-        if (event == tsl::elm::TouchEvent::Touch) {
-            if      (inBtn(kBtnSaveX)) { m_btnPressed = 1; return true; }
-            else if (inBtn(kBtnLoadX)) { m_btnPressed = 2; return true; }
-            else if (inBtn(kBtnQuitX)) { m_btnPressed = 3; return true; }
+    // Memory counter — newlib (mostly static post-init) + Doom Z_Malloc zone
+    // (visibly fluctuates as lump/sound cache loads + evicts).
+    {
+        static u64 mem_last_sample_ns = 0;
+        static char mem_label[112] = "mem: …";
+        const u64 now_ns = armTicksToNs(armGetSystemTick());
+        if (now_ns - mem_last_sample_ns > 1'000'000'000ULL) {
+            mem_last_sample_ns = now_ns;
+            const struct mallinfo mi = mallinfo();
+            const size_t newlib_used_kb = static_cast<size_t>(mi.uordblks) / 1024;
+            const size_t newlib_free_kb = static_cast<size_t>(mi.fordblks) / 1024;
+            const size_t zone_free_kb   =
+                g_doom_initialized
+                ? static_cast<size_t>(Z_FreeMemory()) / 1024
+                : 0;
+            std::snprintf(mem_label, sizeof(mem_label),
+                          "newlib: %zuk used / %zuk free   doom zone: %zuk free",
+                          newlib_used_kb, newlib_free_kb, zone_free_kb);
         }
-        // Release: only fire the action if release happened in the same
-        // button that was originally pressed (drag-out-then-release cancels).
-        if (event == tsl::elm::TouchEvent::Release) {
-            const int hit = m_btnPressed;
-            m_btnPressed = 0;
-            if (hit == 1 && inBtn(kBtnSaveX)) {
-                // Savestate-style: F6 (quicksave to quickSaveSlot=0) + 'y'
-                // to auto-confirm the "Quicksave over slot 0?" prompt. The
-                // engine processes the queue serially so 'y' arrives during
-                // the prompt and dismisses it. Per-WAD save dir comes from
-                // patches/0006 — slot 0 in Doom doesn't collide with slot 0
-                // in Doom 2.
-                doom_trace("Save State: F6 + y");
-                doomgeneric_switch_push_key(1, kDoomKeyF6);
-                doomgeneric_switch_push_key(0, kDoomKeyF6);
-                doomgeneric_switch_push_key(1, kDoomKeyY);
-                doomgeneric_switch_push_key(0, kDoomKeyY);
-                return true;
-            }
-            if (hit == 2 && inBtn(kBtnLoadX)) {
-                // F9 + 'y' — quickload from slot 0, auto-confirm prompt.
-                doom_trace("Load State: F9 + y");
-                doomgeneric_switch_push_key(1, kDoomKeyF9);
-                doomgeneric_switch_push_key(0, kDoomKeyF9);
-                doomgeneric_switch_push_key(1, kDoomKeyY);
-                doomgeneric_switch_push_key(0, kDoomKeyY);
-                return true;
-            }
-            if (hit == 3 && inBtn(kBtnQuitX)) {
-                // CRITICAL: set launchComboHasTriggered before close. Without
-                // this flag, libtesla's close path runs the "exit feedback
-                // sound" branch (tesla.hpp:13867) which conflicts with our
-                // audio backend teardown and crashes Atmosphère. Combo close
-                // sets this; the original Quit button on sx-doom-overlay
-                // didn't, which is why combo worked but Quit was crashy.
-                doom_trace("Quit button — closing overlay");
-                launchComboHasTriggered.store(true, std::memory_order_release);
-                tsl::Overlay::get()->close();
-                return true;
-            }
-        }
-        return false;
+        // Draw just below the game viewport.
+        renderer->drawString(mem_label, false, 20,
+                             kDoomOffsetY + kScaledH + 18, 14,
+                             tsl::Color(0xCFFF));
     }
-
-private:
-    int m_btnPressed = 0;  // 0=none, 1=Save, 2=Load, 3=Quit
-};
+}
 
 
 class DoomGui final : public tsl::Gui {
@@ -490,8 +420,51 @@ public:
     tsl::elm::Element* createUI() override {
         tsl::disableHiding = true;   // combo must close (not hide) while game runs
         m_frame = new DoomOverlayFrame("", "Configure");
-        m_doomElement = new DoomElement();
-        m_frame->setContent(m_doomElement);
+
+        // Layout inside the frame is a libtesla List with:
+        //   1. CustomDrawer — non-interactive game viewport region. Renders
+        //      the Doom framebuffer + heap counter via draw_doom_viewport().
+        //   2. CategoryHeader "Actions" — visual divider, libtesla style.
+        //   3. ListItem "Save State" → quicksave to slot 0 (auto-confirm)
+        //   4. ListItem "Load State" → quickload from slot 0
+        //   5. ListItem "Quit"       → exit overlay (combo-style close)
+        //
+        // ListItems are libtesla's native button primitive — same render
+        // language as the WAD picker. Click listeners fire on touch AND
+        // on A button (when focused), so both touch and gamepad navigation
+        // work out of the box.
+        auto* list = new tsl::elm::List();
+
+        list->addItem(new tsl::elm::CustomDrawer(
+            [](tsl::gfx::Renderer* r, s32 x, s32 y, s32 w, s32 h) {
+                draw_doom_viewport(r, x, y, w, h);
+            }
+        ));
+
+        list->addItem(new tsl::elm::CategoryHeader("Actions"));
+
+        auto* save_item = new tsl::elm::ListItem("Save State");
+        save_item->setClickListener([](u64 keys) -> bool {
+            if (keys & HidNpadButton_A) { doom_actions::save_state(); return true; }
+            return false;
+        });
+        list->addItem(save_item);
+
+        auto* load_item = new tsl::elm::ListItem("Load State");
+        load_item->setClickListener([](u64 keys) -> bool {
+            if (keys & HidNpadButton_A) { doom_actions::load_state(); return true; }
+            return false;
+        });
+        list->addItem(load_item);
+
+        auto* quit_item = new tsl::elm::ListItem("Quit");
+        quit_item->setClickListener([](u64 keys) -> bool {
+            if (keys & HidNpadButton_A) { doom_actions::quit_overlay(); return true; }
+            return false;
+        });
+        list->addItem(quit_item);
+
+        m_frame->setContent(list);
         return m_frame;
     }
 
@@ -570,7 +543,6 @@ public:
 
 private:
     std::string       m_wadPath;
-    DoomElement*      m_doomElement = nullptr;
     DoomOverlayFrame* m_frame       = nullptr;
     u64               m_prevKeysHeld = 0;
 };
