@@ -1,25 +1,30 @@
-// input_map.hpp — Switch HID → Doom keycode mapping for sx-doom-overlay.
+// input_map.hpp — Switch HID → Doom keycode mapping for UltraDoom.
 //
-// libnx HID provides keysDown (newly pressed this frame) and keysUp (newly
-// released this frame). We translate each to a Doom keycode and push into
-// the engine's key queue via doomgeneric_switch_push_key (defined in
-// doomgeneric_switch.c). Doom's input system handles auto-repeat itself
-// for held movement keys, so we only forward DOWN and UP edges.
+// Twin-stick modern controls (Bethesda Doom Classic Switch port pattern):
 //
-// Button mapping (PRD §Flow 2):
-//   D-pad up/down/left/right → KEY_UPARROW/DOWN/LEFT/RIGHT
-//   A                        → KEY_FIRE
-//   B                        → KEY_USE
-//   X                        → KEY_FIRE  (alt for trigger comfort)
-//   Y                        → KEY_TAB   (automap toggle)
-//   L                        → KEY_STRAFE_L
-//   R                        → KEY_STRAFE_R
-//   ZL                       → KEY_RSHIFT (run modifier)
-//   ZR                       → KEY_FIRE  (alt for trigger comfort)
-//   Plus                     → KEY_ESCAPE (Doom in-game menu)
-//   Minus                    → reserved for our settings (Task 11)
+//   MOVEMENT
+//     L-stick up/down     → forward/back
+//     L-stick left/right  → strafe left/right
+//     R-stick left/right  → turn left/right
 //
-// Stick handling will land in a follow-up; D-pad covers basic walk + turn.
+//   COMBAT
+//     ZR                  → fire (primary trigger)
+//     A                   → use + menu select
+//     B                   → alt fire + menu back
+//     ZL                  → run (hold)
+//
+//   WEAPONS (D-pad = weapon shortcuts)
+//     D-up → '1', D-down → '5', D-left → '2', D-right → '3'
+//     L bumper → '4' (chaingun), R bumper → '6' (plasma), Y → '7' (BFG)
+//
+//   UTILITY
+//     X     → automap toggle
+//     Plus  → Escape (menu)
+//     Plus+Minus → quit overlay (handled in DoomGui::handleInput before dispatch)
+//
+// CRITICAL: use specific HidNpadButton_StickL* bits, NOT HidNpadButton_AnyUp
+// etc. — "Any" bundles D-pad + all sticks into one bit, causing all three
+// sticks to turn the camera simultaneously.
 //
 // Licensed under GPLv2.
 
@@ -28,44 +33,58 @@
 #include <switch.h>
 
 extern "C" {
-// In doomgeneric_switch.c.
 void doomgeneric_switch_push_key(int pressed, unsigned char key);
+void doomgeneric_switch_weapon_prev(void);  // reads player state, skips unowned
+void doomgeneric_switch_weapon_next(void);
 }
 
 namespace doom_input {
 
-// HID bit → Doom keycode pairs. Maintained as a contiguous array so the
-// translation loop is just a small fixed scan; libnx emits a maximum of
-// ~25 simultaneous buttons, far more than we'll ever map.
 struct ButtonMapping {
     u64           hid_bit;
     unsigned char doom_key;
 };
 
 constexpr ButtonMapping kButtonMap[] = {
-    { HidNpadButton_AnyUp,    /*KEY_UPARROW   */ 0xad },
-    { HidNpadButton_AnyDown,  /*KEY_DOWNARROW */ 0xaf },
-    { HidNpadButton_AnyLeft,  /*KEY_LEFTARROW */ 0xac },
-    { HidNpadButton_AnyRight, /*KEY_RIGHTARROW*/ 0xae },
-    { HidNpadButton_A,        /*KEY_FIRE      */ 0xa3 },
-    { HidNpadButton_B,        /*KEY_USE       */ 0xa2 },
-    { HidNpadButton_X,        /*KEY_FIRE alt  */ 0xa3 },
-    { HidNpadButton_Y,        /*KEY_TAB       */ 9    },
-    { HidNpadButton_L,        /*KEY_STRAFE_L  */ 0xa0 },
-    { HidNpadButton_R,        /*KEY_STRAFE_R  */ 0xa1 },
-    { HidNpadButton_ZL,       /*KEY_RSHIFT    */ static_cast<unsigned char>(0x80 + 0x36) },
-    { HidNpadButton_ZR,       /*KEY_FIRE alt  */ 0xa3 },
-    { HidNpadButton_Plus,     /*KEY_ESCAPE    */ 27   },
-    // Minus reserved for our settings menu (Task 11) — NOT mapped to Doom
+    // L-stick — movement (twin-stick)
+    { HidNpadButton_StickLUp,    0xad },  // KEY_UPARROW   — forward
+    { HidNpadButton_StickLDown,  0xaf },  // KEY_DOWNARROW — back
+    { HidNpadButton_StickLLeft,  0xa0 },  // KEY_STRAFE_L
+    { HidNpadButton_StickLRight, 0xa1 },  // KEY_STRAFE_R
+    // R-stick — turn
+    { HidNpadButton_StickRLeft,  0xac },  // KEY_LEFTARROW
+    { HidNpadButton_StickRRight, 0xae },  // KEY_RIGHTARROW
+
+    // D-pad — arrow keys (menu nav in menus; movement/turn duplicate in gameplay)
+    { HidNpadButton_Up,    0xad },  // KEY_UPARROW
+    { HidNpadButton_Down,  0xaf },  // KEY_DOWNARROW
+    { HidNpadButton_Left,  0xac },  // KEY_LEFTARROW — turn left
+    { HidNpadButton_Right, 0xae },  // KEY_RIGHTARROW — turn right
+
+    // Face buttons
+    { HidNpadButton_A, 0xa2 },  // KEY_USE   + menu select
+    { HidNpadButton_A, 13   },
+    { HidNpadButton_B, 0xa3 },  // KEY_FIRE  + menu back
+    { HidNpadButton_B, 0x7f },
+    { HidNpadButton_X, 9    },  // KEY_TAB — automap
+    // L/R bumpers handled in dispatch() via weapon_prev/next (not in table).
+
+    // Triggers
+    { HidNpadButton_ZL, static_cast<unsigned char>(0x80 + 0x36) },  // KEY_RSHIFT (run)
+    { HidNpadButton_ZR, 0xa3 },  // KEY_FIRE — primary
+
+    // System
+    { HidNpadButton_Plus, 27 },  // KEY_ESCAPE — open menu
 };
 
-// Forward keysDown / keysUp events into the engine's key queue. Called once
-// per libtesla update() callback from DoomGui::handleInput.
 inline void dispatch(u64 keysDown, u64 keysUp) {
     for (const auto& m : kButtonMap) {
         if (keysDown & m.hid_bit) doomgeneric_switch_push_key(1, m.doom_key);
         if (keysUp   & m.hid_bit) doomgeneric_switch_push_key(0, m.doom_key);
     }
+    // Bumpers — state-aware weapon cycle (skips unowned weapons).
+    if (keysDown & HidNpadButton_L) doomgeneric_switch_weapon_prev();
+    if (keysDown & HidNpadButton_R) doomgeneric_switch_weapon_next();
 }
 
 }  // namespace doom_input
