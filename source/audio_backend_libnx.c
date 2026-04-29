@@ -44,6 +44,8 @@
 #include <malloc.h>      // memalign
 #include <switch.h>
 
+#include "opl/opl_libnx.h"
+
 // Buffer geometry. Latency = (BUFS * FRAMES_PER_BUF) / SAMPLE_RATE.
 // 4 × 1100 frames @ 22050 Hz ≈ 200 ms — generous so the drain thread has
 // plenty of slack against libtesla's variable composite cadence.
@@ -129,23 +131,68 @@ static void submit_thread_main(void* arg) {
     const uint64_t BUF_DURATION_NS =
         ((uint64_t)FRAMES_PER_BUF * 1000000000ULL) / (uint64_t)AUDIO_BACKEND_SAMPLE_RATE;
 
+    // Music render scratch (stereo int16). OPL_LIBNX_Render fills this
+    // each iteration; we then mix it additively into the SFX-filled output
+    // buffer with int16 clamping. Lives in BSS to avoid per-iteration
+    // allocation. Sized for the largest single submit (FRAMES_PER_BUF=1100).
+    static int16_t music_scratch[FRAMES_PER_BUF * AUDIO_BACKEND_CHANNELS];
+
     while (be->running) {
         AudioOutBuffer* buf = &be->buffers[be->next_slot];
+        int16_t* const out = (int16_t*)buf->buffer;
 
-        // Fill from ring (silence-pads if engine hasn't pushed PCM yet).
-        ring_drain(be, (int16_t*)buf->buffer, FRAMES_PER_BUF);
+        // SFX path: ring_drain pulls SFX-only PCM from the engine.
+        ring_drain(be, out, FRAMES_PER_BUF);
+
+        // Music path: render OPL2 directly into music_scratch, then mix on
+        // top of the SFX with HEADROOM-SCALED summation. OPL_LIBNX_Render
+        // runs entirely on this thread under the OPL driver's own queue
+        // mutex (no contention with the audio backend's ring_mtx).
+        //
+        // Bus-mix math: each source scaled by SCALE/256 before summation,
+        // so the worst-case sum is 2 * (SCALE/256) * INT16_MAX. With
+        // SCALE=192 (75%): max sum ≈ 1.5 * INT16_MAX → clipping only
+        // when both signals peak simultaneously, and the saturated edge
+        // is short rather than a sustained square wave (much less audible
+        // distortion than the prior plain `add + hard clamp`).
+        OPL_LIBNX_Render(music_scratch, FRAMES_PER_BUF);
+        const int total_samples = FRAMES_PER_BUF * AUDIO_BACKEND_CHANNELS;
+        // sx-doom-overlay: With compute_lr's 2x boost, a max-volume SFX
+        // already hits ~95% of int16 unscaled. Bus-mix scales reduced to
+        // ~62% per source so the sum stays under int16 even with multiple
+        // simultaneous loud SFX + OPL music — eliminates the hard clip
+        // "distortion at high volume" bug.
+        const int32_t SFX_SCALE   = 160;   // 62% — extra headroom for
+        const int32_t MUSIC_SCALE = 160;   // peak coexistence without clip
+        for (int i = 0; i < total_samples; ++i) {
+            int32_t s = ((int32_t)out[i] * SFX_SCALE
+                       + (int32_t)music_scratch[i] * MUSIC_SCALE) >> 8;
+            if (s >  32767) s =  32767;
+            if (s < -32768) s = -32768;
+            out[i] = (int16_t)s;
+        }
+
         buf->data_size   = BYTES_PER_BUF;
         buf->data_offset = 0;
         buf->next        = NULL;
 
         // Audout submit + cleanup of released buffers — under libtesla's
-        // mutex so we never race its UI sound thread.
-        audio_lock_acquire();
-        AudioOutBuffer* released = NULL;
-        u32 released_count = 0;
-        audoutGetReleasedAudioOutBuffer(&released, &released_count);  // non-blocking
-        const Result rc = audoutAppendAudioOutBuffer(buf);
-        audio_lock_release();
+        // mutex so we never race its UI sound thread. Try-acquire with a
+        // short timeout: if libtesla's audio thread is wedged holding the
+        // mutex (real failure mode seen on hardware), skip this iteration
+        // and try again next cycle. Missing one submit means audout
+        // underflows ~22 ms; a permanent hang would freeze the system.
+        Result rc = 0;
+        if (audio_lock_try_acquire_ms(10)) {
+            AudioOutBuffer* released = NULL;
+            u32 released_count = 0;
+            audoutGetReleasedAudioOutBuffer(&released, &released_count);  // non-blocking
+            rc = audoutAppendAudioOutBuffer(buf);
+            audio_lock_release();
+        } else {
+            // Treat as a transient failure — record but don't latch dead.
+            rc = MAKERESULT(345 /*Module_Libnx*/, 116 /*Cancelled*/);
+        }
 
         if (R_FAILED(rc)) {
             if (be->last_error == 0) {
@@ -232,8 +279,14 @@ audio_backend_status_t audio_backend_init(const char* path_hint,
     be->primed_count    = 0;
     be->next_slot       = 0;
 
+    // 8 KB stack (was 4 KB). The submit thread runs OPL2 emulation +
+    // i_oplmusic MIDI callback chain on top of audio submit + libtesla
+    // mutex acquire — the original 4 KB was within margin and a real
+    // failure mode (HID-thread abort during stage transition) suggested
+    // memory corruption, possibly stack-adjacent. 8 KB has comfortable
+    // headroom; cost is +4 KB BSS, trivial.
     if (R_FAILED(threadCreate(&be->drain_thread, submit_thread_main, be,
-                              NULL, 0x1000, 0x2C, -2))) {
+                              NULL, 0x2000, 0x2C, -2))) {
         goto fail_free_bufs;
     }
     if (R_FAILED(threadStart(&be->drain_thread))) {
@@ -297,36 +350,42 @@ void audio_backend_debug(const audio_backend_t* be, audio_backend_debug_t* out) 
 
 void audio_backend_shutdown(audio_backend_t* be) {
     if (!be) return;
+    extern void doom_trace(const char* msg);
+    doom_trace("audio_backend_shutdown: enter");
+
     be->running = false;
     threadWaitForExit(&be->drain_thread);
     threadClose(&be->drain_thread);
+    doom_trace("audio_backend_shutdown: submit thread stopped");
 
-    // UltraGB shutdown sequence (gb_audio.h:1480-1492):
-    //   1. Lock libtesla mutex.
-    //   2. audoutFlushAudioOutBuffers — kicks all queued buffers out of the
-    //      kernel queue. CRITICAL: do NOT use audoutWaitPlayFinish — it
-    //      only dequeues one buffer per call, so with multiple in flight
-    //      free() races the DMA. Flush is synchronous.
-    //   3. audoutStopAudioOut — synchronous; DMA fully halted on return.
-    //   4. If we own the session: audoutExit (refcount → 0, service closes).
-    //      If libtesla owns it: audoutStartAudioOut to restore its stream
-    //      so libtesla's own UI sounds keep working after we're gone.
-    audio_lock_acquire();
-    bool flush_dummy = false;
-    audoutFlushAudioOutBuffers(&flush_dummy);
-    audoutStopAudioOut();
-    if (be->own_session) {
-        audoutExit();
+    // exitServices is the LAST user code to run before libtesla's __appExit
+    // calls ult::Audio::exit (which does its own audoutStop+audoutExit).
+    // We don't restart the audout stream here — libtesla doesn't need it
+    // restored, the process is one syscall away from termination.
+    //
+    // try_acquire keeps us from blocking forever if libtesla's
+    // backgroundSoundThread is mid-IPC; observed-on-hardware deadlock that
+    // froze the whole Switch UI until sleep/wake reset state.
+    if (audio_lock_try_acquire_ms(50)) {
+        bool flush_dummy = false;
+        audoutFlushAudioOutBuffers(&flush_dummy);
+        audoutStopAudioOut();
+        if (be->own_session) {
+            audoutExit();
+        }
+        // (libtesla case: do nothing — its __appExit teardown handles audout.)
+        audio_lock_release();
+        doom_trace("audio_backend_shutdown: audout teardown done");
     } else {
-        audoutStartAudioOut();
+        doom_trace("audio_backend_shutdown: skipped audout teardown (lock timeout)");
     }
-    audio_lock_release();
 
     for (int i = 0; i < BUFS; ++i) {
         if (be->buf_data[i]) free(be->buf_data[i]);
     }
     free(be->ring);
     free(be);
+    doom_trace("audio_backend_shutdown: exit");
 }
 
 #else  // !__SWITCH__

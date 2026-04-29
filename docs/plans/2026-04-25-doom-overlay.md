@@ -210,15 +210,68 @@ This is a Switch overlay — browser-driven E2E doesn't apply. The Goal Verifica
 - [x] Task 3: Palette + scale blit module (desktop unit-tested) — committed below. 7/7 unit tests pass under ASan + UBSan. Used synthetic hand-computed fixtures (2x2 / 1x1 patterns with known LUTs) instead of full-Doom golden frames; the math is verified directly rather than via circular self-consistency. Real-Doom-frame round-trip will run as part of Task 7 once engine integration lands.
 - [x] Task 4: Audio mixer module — committed below. **Scope-trimmed**: shipped audio_backend.h interface + audio_mixer.{h,c} (8-channel SFX mixer with volume scaling and int16 clipping) + audio_backend_wav.c desktop test backend + 6/6 unit tests passing under ASan+UBSan. The DoD's pistol-fire + music-synth tests against real Doom DSXXXX lumps and MUS data are deferred to Task 9 (where engine + audio backend are both live and we can iterate on real lumps without chicken-and-egg golden-WAV generation). The mixer math is correct by direct verification with synthesized inputs at full/half/clipping amplitudes.
 - [x] Task 5: Cross-build smoke (devkitA64 produces .ovl) — DONE (committed `fefe814` + dist pipeline `88842e4`). `make clean && make` produces `out/sx-doom-overlay.ovl` (520 KB, NRO0 magic, scripts/check-ovl-size.sh OK). `make dist` produces `dist/sx-doom-overlay-0.0.1-bootstrap.zip` (10 MB, correct SD-card layout: README.md + switch/.overlays/sx-doom-overlay.ovl + switch/.overlays/doom/freedoom1.wad + LICENSE.freedoom). DG_* symbol count = 0 (expected — bootstrap.cpp doesn't call doomgeneric_Create yet; will appear in Task 7). RTTI tables (~20 KB) are unavoidable libstdc++ metadata; same as Tetris-Overlay.
-- [ ] Task 6: Overlay skeleton on hardware (test pattern)
-- [ ] Task 7: Engine integration on overlay (Freedoom plays, no audio/UI yet)
-- [ ] Task 8: Input mapping (libnx HID → Doom keys, full controllable gameplay)
-- [ ] Task 9: Audio integration on hardware (sfx + music; coexistence-fallback path)
+- [x] Task 6: Overlay skeleton on hardware (test pattern)
+- [~] Task 7: Engine integration on overlay — **PLAYABLE on hardware 2026-04-25** (game loads, controls work, Freedoom is playable). Caveats below before closure.
+- [~] Task 8: Input mapping — controls confirmed working in playable build (user-verified). Formal DoD pending.
+- [ ] Task 9: Audio integration on hardware (sfx + music; coexistence-fallback path) — currently audio disabled via cmdline flag
 - [ ] Task 10: Heap-too-small error screen + first-launch self-check
 - [ ] Task 11: Settings menu + INI persistence + BYO-WAD detection
 - [ ] Task 12: Save/load wiring + release packaging
 
-**Total Tasks:** 12 | **Completed:** 5 | **Remaining:** 7
+### Task 7 Follow-ups (post-playability)
+
+Status as of 2026-04-25 evening session:
+
+- [x] **7a — Title screen crash FIXED.** Root cause was TWO compounding NULL-deref bugs in the engine, NOT the title rendering itself: (1) `printf` calls into newlib stdout which is NULL in nx-ovlloader (G_DoPlayDemo:2184 fired on every freedoom1 demo-version mismatch); (2) stack-allocated `engine_argv[]` dangling after `try_init_engine()` returned because doomgeneric stores `myargv = argv` as a pointer copy. Fixes: `source/stdio_stubs.c` overrides all libc stdio output with no-ops; `engine_argv[]` made `static`. → TaskList #12.
+- [x] **7b — Doom folder moved.** New location `/switch/sx-doom-overlay/` (per-app data dir convention). `.overlays/` is for binaries only. → TaskList #13.
+- [ ] **7c — Profile and fix gameplay lag.** Diagnostic instrumentation still active in main.cpp (per-tick gamestate trace 130–199); likely contributing to lag. Remove first, then profile. → TaskList #11.
+- [ ] **7d — Remove diagnostic instrumentation** — pending #7c profiling.
+- [ ] **7e — Windowed mode** — deferred. Larger Doom viewport requires libtesla swizzle replacement. → TaskList #14.
+- [x] **7f — Resume-from-dismiss freeze FIXED.** Old `onShow` re-anchor reset `s_tick_anchor` to 0 which made engine `lasttime - nowtime` negative → engine ran zero tics → game appeared frozen. Fix: advance `s_tick_anchor` by exactly the dismissal duration so DG_GetTicksMs is *continuous* from engine perspective (cooperative pause). → TaskList #15.
+- [x] **7g — WAD picker UI shipped.** Scans `/switch/sx-doom-overlay/*.wad`, displays libtesla List with friendly names (Doom / Doom 2 / Chex Quest 3 / Freedoom etc.). User picks with A. (Partial Task 11 — full settings menu still pending.)
+- [x] **7h — Twin-stick + weapon cycle controls.** L-stick = move/strafe, R-stick = turn (no more triple-bound `HidNpadButton_AnyXxx`). L/R bumpers cycle prev/next OWNED weapons by reading `players[0].weaponowned[]`. Quit combo = Plus+Minus. A also sends 'y' / B sends 'n' for engine dialog confirmations.
+- [x] **7i — Engine turn speed bumped.** `patches/0003-faster-turn-speed.patch` raises `angleturn[0]` from 640 → 1024 BAM/tic so R-stick (digital push past deadzone) feels responsive without affecting run-modifier turn rate.
+- [ ] **7j — Touchable on-screen overlay UI** — like other libtesla overlays. Tap targets for quit / change WAD / settings. → TaskList #16.
+- [ ] **7k — Save game without keyboard text entry** — F6 quicksave dialog can be confirmed (Y/N now bound), but full save-game name entry requires a virtual keyboard or an engine patch to auto-name saves. → TaskList #18.
+
+**Total Tasks:** 12 | **Completed:** 6 | **In Progress:** 1 (Task 7) | **Remaining:** 4 (Tasks 9–12)
+**Task 7 Follow-ups:** 11 (8 closed, 3 deferred to TaskList items)
+
+## Session Findings — 2026-04-25 implementation pass
+
+Bug classes and patterns discovered while bringing Task 7 to playable. Future implementers and verifiers: read this before debugging analogous symptoms.
+
+### Bug class — libc stdio is NULL in nx-ovlloader
+
+Any unguarded `printf` / `fprintf` / `puts` / `putchar` / `fputs` / `fputc` / `vfprintf` / `vprintf` / `perror` call from within a libtesla overlay process will deref NULL inside newlib's `__sbprintf` and bring down the OS via Atmosphère (not even a clean `I_Error`-level crash — a hard OS panic). Symptom is a Data Abort at `Address: 0x0` with PC inside `__sbprintf`.
+
+Doomgeneric has 220+ unguarded stdio output calls. Patching each is impractical. Fix is `source/stdio_stubs.c` which provides no-op overrides for all stdio output APIs at link time — linker resolves our symbols before libc, so newlib's vfprintf machinery is never pulled in. `nm` confirms `__sbprintf` is absent from the binary.
+
+**Generalize:** any C library that assumes a working stdout (logging, error reporting) needs the same stub treatment when integrated into nx-ovlloader.
+
+### Bug class — pointers passed to engine outlive their stack frame
+
+doomgeneric's `doomgeneric_Create` does `myargv = argv` (pointer copy, no deep copy — see `lib/doomgeneric/doomgeneric/doomgeneric.c:17`). Any caller that passes a stack-allocated argv array creates a dangling pointer the moment the caller returns. Subsequent ticks that scan args (`G_DoPlayDemo` calls `M_CheckParm("-solo-net")`, etc.) deref freed stack memory and SEGV.
+
+**Fix:** all arrays passed across the engine boundary must have `static` or program lifetime. See `try_init_engine` in `source/main.cpp` for the pattern.
+
+**Generalize:** check every `extern` engine call site for stack-vs-static lifetime mismatches. Same risk applies to anything else passed by pointer that the engine retains.
+
+### Bug class — clock discontinuity on resume confuses engine timing
+
+The engine's `d_loop.c:201` keeps a static `lasttime` populated by `I_GetTime()` (which calls our `DG_GetTicksMs`). If `DG_GetTicksMs` ever rewinds to 0 (which our original `onShow` re-anchor did), `newtics = nowtime - lasttime` goes negative and the engine runs zero tics → game appears frozen.
+
+**Fix:** make resume invisible to the engine. Advance `s_tick_anchor` by exactly the elapsed real time during dismissal so `DG_GetTicksMs` is continuous. See `doomgeneric_switch_reanchor_clock()` in `source/doomgeneric_switch.c`.
+
+### Architectural finding — libtesla framebuffer swizzle is hardcoded
+
+libtesla's default framebuffer is 448×720 with a hardcoded block-linear swizzle (`tesla.hpp:2700`). Setting `cfg::FramebufferWidth/Height` to non-default values does NOT recompute the swizzle constants — pixels past x=447 land at wrong memory addresses and corrupt libtesla state, eventually crashing Atmosphère.
+
+This blocks the original plan's "render scale 1×/2×/3× at runtime" design. Current build draws Doom 320×200 centered in the 448×720 default framebuffer at 1× scale. Larger viewports need either a swizzle replacement or libtesla windowed mode — see Task #14.
+
+### Heap finding — `-mb 6` confirmed too tight even after framebuffer fixes
+
+Re-tested `-mb 6` after the framebuffer/swizzle bugs were resolved. Engine still fails `Z_Init` malloc in 6 ms with `longjmp 6`. Libtesla overlay heap can't spare 6 contiguous MiB. **`-mb 4` is the ceiling** — confirmed as a hard runtime limit, not a transient symptom.
 
 ## Implementation Tasks
 

@@ -26,6 +26,14 @@ bool switch_audio_submit(const int16_t* pcm, size_t frames);
 // libtesla's UI sound thread (which submits to the same audout stream).
 void audio_lock_acquire(void);
 void audio_lock_release(void);
+
+// Try to acquire the audio lock within `timeout_ms`. Returns true if held
+// (caller must release), false on timeout (caller must NOT release).
+// Used during shutdown to avoid hanging the entire system when libtesla's
+// backgroundSoundThread is wedged mid-IPC (a real failure mode observed
+// on hardware — process froze until sleep/wake reset state).
+bool audio_lock_try_acquire_ms(unsigned timeout_ms);
+
 bool audio_libtesla_initialized(void);
 
 #ifdef __cplusplus

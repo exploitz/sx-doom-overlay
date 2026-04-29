@@ -46,3 +46,15 @@ diagnostics/
 # Legacy reference clones (deleted in Task 1, but ignore in case they're re-cloned)
 Ultrahand-Overlay/
 _reference/
+
+# Reference clones from session research (UltraGB audio approach,
+# chocolate-doom OPL/i_oplmusic source). Vendored copies live in source/opl/.
+lib/UltraGB/
+lib/chocolate-doom/
+
+# Per-session crash dumps + trace.log copied off the SD card for debugging
+logs/
+dumps/
+
+# Accidental scratch files
+docs/d-users-*

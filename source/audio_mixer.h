@@ -33,8 +33,11 @@ extern "C" {
 
 typedef struct audio_mixer_channel_s {
     const int16_t* pcm;       // owned externally; mixer does not free
-    size_t         length;    // number of frames in pcm
-    size_t         pos;       // current read position
+    size_t         length;    // number of frames in pcm (at SOURCE rate)
+    uint64_t       pos_fp;    // 16.16 fixed-point read position (whole | frac)
+    uint32_t       step_fp;   // 16.16 fixed-point per-output-frame increment
+                              // = (source_rate << 16) / output_rate
+                              // 0x10000 means same-rate playback (no resample)
     uint8_t        vol_l;     // 0–255
     uint8_t        vol_r;     // 0–255
     bool           active;    // true while pcm is being mixed
@@ -49,9 +52,13 @@ typedef struct audio_mixer_s {
 void audio_mixer_init(audio_mixer_t* m);
 
 // Start a sound on channel `slot`. Returns true if started, false if slot
-// is invalid or `pcm` is NULL.
+// is invalid or `pcm` is NULL. step_fp is the per-output-frame increment
+// in 16.16 fixed point. For "play at native rate" pass 0x10000. For
+// resample-on-mix from a slower source, pass (src_rate << 16) / out_rate.
+// length is in source-rate frames.
 bool audio_mixer_play(audio_mixer_t* m, int slot,
                       const int16_t* pcm, size_t length,
+                      uint32_t step_fp,
                       uint8_t vol_l, uint8_t vol_r);
 
 // Stop a channel.
