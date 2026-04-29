@@ -7,7 +7,7 @@
 # tighter redistribution rules).
 #
 # Output:
-#   data/freedoom1.wad
+#   data/wads/freedoom1.wad
 #   data/LICENSE.freedoom (BSD-3 attribution, required by the Freedoom license)
 #
 # Idempotent — re-running with a valid WAD already present is a no-op.
@@ -20,7 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 DATA_DIR="$ROOT/data"
-WAD_PATH="$DATA_DIR/freedoom1.wad"
+WADS_DIR="$DATA_DIR/wads"
+WAD_PATH="$WADS_DIR/freedoom1.wad"
 LICENSE_PATH="$DATA_DIR/LICENSE.freedoom"
 
 # Source: https://freedoom.github.io/ — Phase 1, latest stable release.
@@ -33,7 +34,7 @@ FREEDOOM_EXTRACT_DIR="/tmp/freedoom-${FREEDOOM_VERSION}"
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 err() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; }
 
-mkdir -p "$DATA_DIR"
+mkdir -p "$WADS_DIR"
 
 # --- Skip if already present and valid ---------------------------------------
 
