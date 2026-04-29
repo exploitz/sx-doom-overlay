@@ -183,8 +183,27 @@ std::vector<WadEntry> scan_wads() {
     return result;
 }
 
+// Pick whichever trace log already exists on disk so multiple builds (Ethan's
+// older fork at /config/sx-doom-overlay/, current main at /config/doom/) all
+// append to the same file rather than each making its own. First call
+// resolves the path; subsequent calls reuse it.
+static const char* resolve_trace_log_path() {
+    static const char* resolved = nullptr;
+    if (resolved) return resolved;
+    static const char* candidates[] = {
+        "sdmc:/config/sx-doom-overlay/trace.log",  // legacy / Ethan's fork
+        "sdmc:/config/doom/trace.log",             // current canonical
+    };
+    for (auto p : candidates) {
+        FILE* f = std::fopen(p, "r");
+        if (f) { std::fclose(f); resolved = p; return resolved; }
+    }
+    resolved = kTraceLog;  // default — gets created on first append
+    return resolved;
+}
+
 extern "C" void doom_trace(const char* msg) {
-    FILE* f = std::fopen(kTraceLog, "a");
+    FILE* f = std::fopen(resolve_trace_log_path(), "a");
     if (f) {
         // snprintf+fwrite, NOT fprintf: stdio_stubs.c overrides fprintf to a
         // no-op (prevents 220+ unguarded engine prints crashing on NULL stdout).
@@ -433,6 +452,15 @@ inline void draw_doom_viewport(tsl::gfx::Renderer* renderer,
         renderer->drawString(mem_label, false, 20,
                              kDoomOffsetY + kScaledH + 18, 14,
                              tsl::Color(0xCFFF));
+
+        // Build identity — git branch@hash[+] from Makefile -DAPP_VERSION.
+        // Lets us tell at a glance which build is on the Switch (Ethan / me /
+        // OPL branch / OGG branch all look identical otherwise).
+#ifdef APP_VERSION
+        renderer->drawString("build: " APP_VERSION, false, 20,
+                             kDoomOffsetY + kScaledH + 36, 13,
+                             tsl::Color(0x9FFF));
+#endif
     }
 }
 
