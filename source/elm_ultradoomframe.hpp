@@ -58,10 +58,12 @@ public:
         // --- Animated "DOOM" title — Tetris-style baseline y=68 ---
         draw_doom_title(renderer, 20, 68, 42);
 
-        // --- Version: raw APP_VERSION (git branch@hash[+]) at top header.
-        // We bypass ult::cleanVersionLabel here because it strips everything
-        // that isn't a digit/dot/plus, which mangles "main@b2a0fb6+" to "2".
-        renderer->drawString(APP_VERSION, false, 183, 60, 15, tsl::bannerVersionTextColor);
+        // --- Version: APP_VERSION (semver, e.g. "0.1.0") at top header.
+        // Build identity (git branch@hash) is shown separately near the heap
+        // counter via BUILD_ID — the two are decoupled so users see a clean
+        // marketing version up here.
+        static const std::string versionLabel = ult::cleanVersionLabel(APP_VERSION);
+        renderer->drawString(versionLabel.c_str(), false, 183, 60, 15, tsl::bannerVersionTextColor);
 
         if (m_footerHidden) {
             if (m_contentElement != nullptr) m_contentElement->frame(renderer);
