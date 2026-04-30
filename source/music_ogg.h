@@ -34,6 +34,14 @@ void music_ogg_render(int16_t* dst, size_t frames);
 // Pass NULL or "" to disable per-WAD lookup and use the flat /music/ path.
 void music_ogg_set_iwad(const char* iwad_basename);
 
+// Returns a short literal naming the backend driving the current song:
+//   "OGG"            — stb_vorbis decoding the per-WAD or flat OGG file
+//   "OPL"            — FM-synth fallback for songs with no matching OGG
+//   "OGG (paused)"   — decoder loaded but paused
+//   "silent"         — no song active (intermission, between levels)
+// Lockless. The string is a static literal — never free it.
+const char* music_ogg_current_backend(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -55,6 +55,18 @@ extern void doom_trace(const char* msg);
 // picks the right one for whichever WAD is loaded.
 static char g_iwad_name[64] = "";
 
+// Lockless snapshot of which backend is currently driving music output.
+// Used by the overlay UI debug line to show "OGG" vs "OPL" so the user can
+// tell at a glance whether a given song is decoding from disk or being FM-
+// synthesized. Race-tolerant: a single int read mid-song-swap shows stale
+// state for one UI frame, which is fine.
+const char* music_ogg_current_backend(void) {
+    if (g_opl_active) return "OPL";
+    if (g_music.decoder && g_music.playing) return "OGG";
+    if (g_music.decoder) return "OGG (paused)";
+    return "silent";
+}
+
 void music_ogg_set_iwad(const char* iwad_basename) {
     if (!iwad_basename) { g_iwad_name[0] = '\0'; return; }
     size_t i = 0;
