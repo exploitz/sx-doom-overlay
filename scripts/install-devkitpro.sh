@@ -115,10 +115,19 @@ INLINE_INSTALL
 
 # --- Step 3: install switch-dev ----------------------------------------------
 
-bold "==> Step 3: install switch-dev meta-package (devkitA64 + libnx + portlibs)"
+bold "==> Step 3: install switch-dev + portlibs (toolchain + libnx + curl/zlib/mbedtls)"
 echo "    This downloads ~3-5 GB. May take several minutes."
+
+# switch-dev is the toolchain + libnx group. switch-curl/zlib/mbedtls are
+# the portlib packages this project links against (libultrahand uses curl
+# for online updater stuff; mbedtls is its TLS provider). Listing them
+# explicitly here means we don't depend on group metadata staying stable.
+# Without them the build fails on 'fatal error: curl/curl.h: No such file
+# or directory' partway through compiling source/audio_lock.cpp.
 sudo dkp-pacman -Syu --noconfirm
-sudo dkp-pacman -S --noconfirm switch-dev
+sudo dkp-pacman -S --needed --noconfirm \
+    switch-dev \
+    switch-curl switch-zlib switch-mbedtls
 
 # --- Step 4: verify ----------------------------------------------------------
 

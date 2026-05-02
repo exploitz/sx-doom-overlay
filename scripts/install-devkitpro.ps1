@@ -151,6 +151,46 @@ if (-not (Test-Path (Join-Path $DevKitProDir "libnx"))) {
 Write-Host "    libnx: present"
 
 # -----------------------------------------------------------------------------
+# Step 5b: install required portlib packages.
+# The base 'switch-dev' install only ships the toolchain + libnx. The
+# overlay links against -lcurl -lz -lmbedtls (libultrahand uses curl for
+# online updater stuff; mbedtls is its TLS provider). Without these the
+# build fails with 'fatal error: curl/curl.h: No such file or directory'
+# halfway through compiling source/audio_lock.cpp.
+# -----------------------------------------------------------------------------
+
+Bold "Installing portlib packages (switch-curl + switch-zlib + switch-mbedtls)"
+
+# pacman lives at C:\devkitPro\msys2\usr\bin\pacman.exe after a fresh
+# install. The installer adds it to PATH but sometimes only after a new
+# shell opens, so resolve the absolute path first then fall back to PATH.
+$Pacman = $null
+foreach ($candidate in @(
+    (Join-Path $DevKitProDir "msys2\usr\bin\pacman.exe"),
+    'pacman',
+    'dkp-pacman'
+)) {
+    $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+    if ($cmd) { $Pacman = $cmd.Source; break }
+}
+
+if (-not $Pacman) {
+    Warn "pacman not found at $DevKitProDir\msys2\usr\bin\pacman.exe or on PATH."
+    Warn "Install switch-curl, switch-zlib, switch-mbedtls manually:"
+    Warn "    Open 'devkitPro MSys2' from the Start Menu and run:"
+    Warn "        pacman -S switch-curl switch-zlib switch-mbedtls --noconfirm"
+} else {
+    Write-Host "    Using pacman at $Pacman"
+    # --needed skips already-installed packages; --noconfirm skips prompts.
+    & $Pacman -S --needed --noconfirm switch-curl switch-zlib switch-mbedtls
+    if ($LASTEXITCODE -ne 0) {
+        Warn "pacman returned exit $LASTEXITCODE -- some packages may not have installed."
+        Warn "If the build later fails on 'curl/curl.h: No such file', install"
+        Warn "manually from devkitPro MSys2: pacman -S switch-curl switch-zlib switch-mbedtls"
+    }
+}
+
+# -----------------------------------------------------------------------------
 # Step 6: next steps
 # -----------------------------------------------------------------------------
 
