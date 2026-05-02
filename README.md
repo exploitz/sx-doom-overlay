@@ -171,31 +171,56 @@ Wait for nx-ovlloader 2.0.1 or downgrade to a compatible HOS.
 ## Build from source
 
 > Requires devkitPro (devkitA64 + libnx + portlibs) and a clone of this
-> repo with submodules. Tested on Linux/WSL2 and Windows MSYS2.
+> repo with submodules. Native Windows, Linux, macOS, and WSL2 are all
+> first-class supported.
+
+### Step 1: install devkitPro (one-time setup)
+
+Pick the path that matches your OS:
+
+| OS | How |
+|---|---|
+| **Windows native** | Run the [devkitPro Windows installer](https://github.com/devkitPro/installer/releases). It puts everything at `C:\devkitPro\` and sets `DEVKITPRO` for you. After install, all subsequent build steps run inside the **"devkitPro MSys2"** shell (Start Menu → "devkitPro MSys2"), which has bash + make + tar + wget bundled. **Do NOT need WSL.** |
+| **Linux (Debian/Ubuntu/WSL2)** | `sudo ./scripts/install-devkitpro.sh` (apt-based). Installs to `/opt/devkitpro/`. |
+| **macOS / other Linux** | Follow [devkitPro pacman docs](https://devkitpro.org/wiki/devkitPro_pacman) directly — install pacman, then `sudo dkp-pacman -S switch-dev`. |
+
+### Step 2: clone + build (all platforms)
+
+Run these inside your platform's bash-capable shell (devkitPro MSys2 on
+Windows; bash directly on Linux/WSL/macOS):
 
 ```bash
-# 1. Install devkitPro (Linux/WSL2 — see scripts/install-devkitpro.sh)
-sudo ./scripts/install-devkitpro.sh
-
-# 2. Clone with submodules
+# Clone with submodules
 git clone --recurse-submodules https://github.com/<your-org>/sx-doom-overlay.git
 cd sx-doom-overlay
 
-# 3. Fetch Freedoom 1 (BSD-3, ~29 MB download)
+# Fetch Freedoom 1 (BSD-3, ~29 MB download)
 ./scripts/fetch-freedoom.sh
 
-# 4. Apply patches (lowers Doom zone to 3 MiB; replaces engine exit() calls
-#    with longjmp so engine errors don't kill the overlay sysmodule)
-./scripts/apply-patches.sh
-
-# 5. Build
+# Build (patches auto-apply via Makefile dependency)
 make
 # Output: out/sx-doom-overlay.ovl
 
-# 6. Build release zip
+# Build release zip
 make dist
 # Output: dist/sx-doom-overlay-X.Y.Z.zip
 ```
+
+The bottom of the running overlay shows `build: <branch>@<hash>+` so you
+can confirm a Switch is running the binary you just built.
+
+### Step 3 (optional): per-WAD music packs
+
+Drop your WADs into `data/wads/`, then either:
+
+- `bash scripts/fetch-chex-music.sh` — pulls a pre-rendered Chex Quest
+  pack (50 MB, Arachno SoundFont, free) into `data/music/chex/`.
+- `python3 scripts/extract-wad-music.py --sf2 path/to/font.sf2` — render
+  any WAD's MUS lumps to OGG at the SoundFont of your choice. Output
+  lands in `data/music/<wad-stem>/`.
+
+Copy the matching subdir to `sdmc:/switch/sx-doom-overlay/music/<wad-stem>/`
+on the SD card. Runtime auto-picks the right pack per loaded WAD.
 
 ### Desktop tests
 

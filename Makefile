@@ -20,7 +20,10 @@
 .DEFAULT_GOAL := all
 
 ifeq ($(strip $(DEVKITPRO)),)
-$(error DEVKITPRO is not set. Install devkitPro and `export DEVKITPRO=/opt/devkitpro`. See README.md "Build prerequisites".)
+$(error DEVKITPRO is not set. Install devkitPro for your OS and re-run: \
+  Linux/WSL → `sudo ./scripts/install-devkitpro.sh` \
+  Windows native → run the official installer from https://github.com/devkitPro/installer/releases, then build from the "devkitPro MSys2" shell. \
+  See README.md "Build from source" for the full cross-platform guide.)
 endif
 
 TOPDIR ?= $(CURDIR)

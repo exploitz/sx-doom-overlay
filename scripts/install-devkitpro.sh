@@ -36,6 +36,28 @@ if [ -d "$DEVKITPRO_DIR" ] && [ -x "$DEVKITPRO_DIR/devkitA64/bin/aarch64-none-el
 fi
 
 bold "==> Detecting platform"
+
+# Bail loudly if this is being run on native Windows / MSys2 / Cygwin / Git
+# Bash. devkitPro on Windows is installed via the official Updater, NOT this
+# apt-based script. Pointing them at the right install path saves an hour of
+# debugging "sudo: command not found" loops.
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+        err "Native Windows / MSys2 detected. This script is Linux-only."
+        err "Install devkitPro for Windows from:"
+        err "    https://github.com/devkitPro/installer/releases"
+        err "After install, build from the 'devkitPro MSys2' shell (Start Menu)."
+        err "See README.md 'Build from source' for the full Windows path."
+        exit 1
+        ;;
+    Darwin)
+        err "macOS detected. This script is Debian/Ubuntu-specific (apt-based)."
+        err "Install devkitPro on macOS via dkp-pacman:"
+        err "    https://devkitpro.org/wiki/devkitPro_pacman"
+        exit 1
+        ;;
+esac
+
 if ! command -v sudo >/dev/null 2>&1; then
     err "sudo is required but not found in PATH. Install sudo first."
     exit 1

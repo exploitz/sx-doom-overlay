@@ -3,9 +3,11 @@
 # sync-sd.sh — auto-deploy .ovl to Switch SD + pull back diagnostics.
 #
 # Use case: Switch is in USB mass-storage mode (Hekate UMS) so the SD card
-# shows up on Windows as a removable drive, accessible from WSL via /mnt/X/.
+# shows up as a removable drive on the host. Works from any bash-capable
+# shell — WSL, devkitPro MSys2 on native Windows, Git Bash, Linux, macOS.
 # This script:
-#   1. Detects the SD card by looking for /mnt/<letter>/switch/.overlays/
+#   1. Detects the SD card by looking under /mnt/<letter>/, /<letter>/, or
+#      /Volumes/<label>/ for switch/.overlays/ or atmosphere/contents/
 #   2. Copies out/sx-doom-overlay.ovl into /switch/.overlays/
 #   3. Optionally syncs the bundled WAD if --wad is passed
 #   4. Pulls back trace.log + new /atmosphere/crash_reports/*.{log,bin}
@@ -26,9 +28,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 OVL_PATH="$ROOT/out/sx-doom-overlay.ovl"
-WAD_PATH="$ROOT/data/freedoom1.wad"
+WAD_PATH="$ROOT/data/wads/freedoom1.wad"
 LICENSE_PATH="$ROOT/data/LICENSE.freedoom"
 DIAG_BASE="$ROOT/diagnostics"
+
+# Cross-platform host→Windows path translation. WSL has wslpath, MSys2 /
+# Cygwin / Git Bash have cygpath, native Linux/macOS have neither (and
+# don't need it — those environments don't talk to PowerShell).
+to_win_path() {
+    local p="$1"
+    if command -v wslpath >/dev/null 2>&1; then
+        wslpath -w "$p"
+    elif command -v cygpath >/dev/null 2>&1; then
+        cygpath -w "$p"
+    else
+        # No translator available — pass through. Caller will likely fail,
+        # but emitting a usable diagnostic is better than silently 0-output.
+        printf '%s' "$p"
+    fi
+}
 
 DO_PUSH_OVL=1
 DO_PUSH_WAD=0
@@ -49,9 +67,14 @@ warn() { printf '\033[33mWARN:\033[0m %s\n' "$*" >&2; }
 
 # --- Detect SD ---------------------------------------------------------------
 
-bold "==> Detecting Switch SD card via /mnt/* drives"
+bold "==> Detecting Switch SD card across platform mount points"
 SD_ROOT=""
-for d in /mnt/[a-z]; do
+# Drive-letter mount roots vary by host shell:
+#   WSL:    /mnt/c, /mnt/d, ...
+#   MSys2 / Git Bash / Cygwin:  /c, /d, ...
+#   macOS:  /Volumes/<label>
+for d in /mnt/[a-z] /[a-z] /Volumes/*; do
+    [ -d "$d" ] || continue
     if [ -d "$d/switch/.overlays" ] || [ -d "$d/atmosphere/contents" ]; then
         SD_ROOT="$d"
         break
@@ -91,19 +114,19 @@ fi
 
 PS_SCRIPT_WIN=""
 if [ "$SD_ROOT" = "MTP" ]; then
-    PS_SCRIPT_WIN="$(wslpath -w "$SCRIPT_DIR/mtp-sync.ps1")"
+    PS_SCRIPT_WIN="$(to_win_path "$SCRIPT_DIR/mtp-sync.ps1")"
 fi
 
 mtp_push() {
     local local_path="$1" remote_path="$2"
-    local local_win="$(wslpath -w "$local_path")"
+    local local_win="$(to_win_path "$local_path")"
     powershell.exe -ExecutionPolicy Bypass -File "$PS_SCRIPT_WIN" \
         -Action push -LocalPath "$local_win" -RemotePath "$remote_path"
 }
 
 mtp_pull() {
     local remote_path="$1" local_path="$2"
-    local local_win="$(wslpath -w "$local_path")"
+    local local_win="$(to_win_path "$local_path")"
     powershell.exe -ExecutionPolicy Bypass -File "$PS_SCRIPT_WIN" \
         -Action pull -RemotePath "$remote_path" -LocalPath "$local_win"
 }
