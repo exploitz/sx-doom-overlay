@@ -13,11 +13,13 @@ go back. Built on [doomgeneric](https://github.com/ozkl/doomgeneric)
 [Freedoom Phase 1](https://freedoom.github.io/) (BSD-3) so it plays out
 of the box; bring your own DOOM1.WAD / DOOM2.WAD if you'd rather.
 
-> **Status: pre-release.** Project tracking via
-> [docs/plans/2026-04-25-doom-overlay.md](docs/plans/2026-04-25-doom-overlay.md).
-> 4 of 12 implementation tasks complete (project bootstrap, desktop engine
-> smoke, palette+blit module, audio mixer skeleton). Hardware integration
-> pending devkitPro install.
+> **Status: playable, active development.** All 12 of the original
+> implementation tasks are complete and the engine runs E1M1+ with
+> SFX, OPL or OGG music, savestates, touch UI, and per-WAD music
+> packs on real hardware. Cross-platform builds: native Windows,
+> Linux, WSL2, macOS.
+>
+> Project tracking: [docs/plans/2026-04-25-doom-overlay.md](docs/plans/2026-04-25-doom-overlay.md).
 
 ---
 
@@ -80,21 +82,41 @@ homebrew Doom ports use; mess with it if it doesn't suit you.
 
 ---
 
-## Settings
+## What's on screen
 
-Press **Minus** during gameplay to open the settings page. Persisted to
-`/config/sx-doom-overlay/config.ini`.
+The overlay header shows the libtesla title bar with the animated DOOM
+logo, the semver `0.1.0`, and your sysmon widget (clock / battery / CPU)
+in the top-right (matches every other libtesla overlay).
 
-| Setting | Values | Notes |
-|---|---|---|
-| Render scale | 1× / 2× / 3× | Default 2× (640×400). 3× = 960×600 if your heap allows. |
-| Master volume | 0–100 | Applies in real time |
-| Music volume | 0–100 | Same |
-| Active WAD | (auto-detected) | Drop more `*.wad` files at `/switch/.overlays/doom/` to add to the picker |
-| Vibration | on / off | Rumble on weapon fire |
+Below the game viewport, a small debug line reports two live status fields:
 
-**Render scale and active WAD changes require closing and reopening the
-overlay to take effect.** Volume changes are live.
+```
+newlib: 124k used / 392k free   doom zone: 1843k free
+build: main@1b5a2d0+   audio: OGG
+```
+
+- `newlib:` and `doom zone:` are the two heap pools, refreshed once per
+  second. Watch them during dense combat — if the doom zone drops below
+  ~200 KB you're at risk of an `I_Error` zone-out-of-memory on the next
+  level transition.
+- `build:` is the git branch and short hash baked into the binary
+  (passed via `-DBUILD_ID` at compile time). Use this to verify the
+  `.ovl` on the SD matches the source you just built — most "my change
+  isn't showing up" reports turn out to be a stale `.ovl`.
+- `audio:` is the music backend currently driving output:
+  - `OGG` — stb_vorbis decoding from your music pack on disk
+  - `OPL` — FM-synth fallback for songs with no matching OGG file
+  - `silent` — between songs (intermissions, menus)
+
+The bottom row has touch buttons:
+
+| Button | Action |
+|---|---|
+| **QUICK SAVE** | Saves to slot 7 (overwrites any existing slot 7 silently) |
+| **QUICK LOAD** | Loads slot 7 |
+| **Quit** | Closes the overlay (auto-saves to slot 7 on the way out if a level is loaded) |
+
+Tap any button or use Ultrahand's launch combo to close the overlay.
 
 ---
 
@@ -111,9 +133,49 @@ v2 territory). Drop them at `/switch/.overlays/doom/`:
 /switch/.overlays/doom/doom2.wad       ← DOOM II (your copy)
 ```
 
-Then pick the WAD you want from the settings page. We do **not**
-distribute commercial WADs — id Software's redistribution terms apply
-to those.
+Pick the WAD from the in-overlay launcher list when you open the
+overlay. We do **not** distribute commercial WADs — id Software's
+redistribution terms apply to those.
+
+---
+
+## Music packs
+
+The overlay's music backend has three layers, tried in order per song:
+
+1. **Per-WAD OGG pack** at `/switch/sx-doom-overlay/music/<iwad-stem>/d_*.ogg` —
+   if the WAD you're loading is `chex.wad`, the overlay looks here first.
+   Use this when you have multiple WADs cached side-by-side.
+2. **Flat OGG layout** at `/switch/sx-doom-overlay/music/d_*.ogg` —
+   legacy / single-WAD setups where you don't bother with subdirs.
+3. **OPL fallback** — if no matching OGG file exists, the engine
+   FM-synthesizes the original MUS lump from the WAD via Nuked-OPL3.
+   No download or file required; works for any WAD.
+
+The `audio:` field in the on-screen debug line shows which layer is
+active for the song that's currently playing.
+
+**Where to get OGG packs:**
+
+- **Doom 1+2, Plutonia, TNT** — Brandon Blume's
+  [Roland SC-55 archive](https://archive.org/details/sc55-doom-music-pack)
+  on archive.org (free).
+- **Chex Quest** — `bash scripts/fetch-chex-music.sh` from the repo
+  fetches Maxime Abbey's Arachno SoundFont pack (50 MB, free).
+- **Anything else** — `python3 scripts/extract-wad-music.py --sf2 path/to/font.sf2`
+  renders any WAD's MUS lumps to OGG using your SoundFont of choice.
+  Output lands in `data/music/<wad-stem>/` ready to copy to the SD.
+
+Layout on the SD when you have multiple packs:
+
+```
+/switch/sx-doom-overlay/music/doom/d_e1m1.ogg     ← SC-55 pack for DOOM/DOOM1
+/switch/sx-doom-overlay/music/chex/d_e1m1.ogg     ← Arachno pack for CHEX
+/switch/sx-doom-overlay/music/freedoom1/d_e1m1.ogg
+```
+
+The overlay reads the loaded WAD's filename, lowercases the stem, and
+looks in the matching subdir — no manual selection needed.
 
 ---
 
@@ -182,7 +244,15 @@ Pick the path that matches your OS:
 |---|---|
 | **Windows native** | Run `.\scripts\install-devkitpro.ps1` from PowerShell (downloads + launches the official installer interactively), or grab the [installer](https://github.com/devkitPro/installer/releases) yourself. Either way it puts everything at `C:\devkitPro\` and adds `make` + `bash` + the cross-toolchain to `PATH`. **`make` then works from any shell** — PowerShell, cmd, Windows Terminal, or the bundled "devkitPro MSys2". WSL is not required. For a one-shot bootstrap (install + submodules + first build), use `.\scripts\setup-windows.ps1`. |
 | **Linux (Debian/Ubuntu/WSL2)** | `sudo ./scripts/install-devkitpro.sh` (apt-based). Installs to `/opt/devkitpro/`. |
-| **macOS / other Linux** | Follow [devkitPro pacman docs](https://devkitpro.org/wiki/devkitPro_pacman) directly — install pacman, then `sudo dkp-pacman -S switch-dev`. |
+| **macOS / other Linux** | Follow [devkitPro pacman docs](https://devkitpro.org/wiki/devkitPro_pacman) directly — install pacman, then `sudo dkp-pacman -S switch-dev switch-curl switch-zlib switch-mbedtls`. |
+
+Both supported install scripts also pull `switch-curl`, `switch-zlib`,
+and `switch-mbedtls` automatically (libultrahand links against curl;
+mbedtls is its TLS provider). If you set up devkitPro by hand and
+later see `fatal error: curl/curl.h: No such file or directory` mid-
+build, that's the missing piece — install with `pacman -S switch-curl
+switch-zlib switch-mbedtls --noconfirm` from any shell where `pacman`
+is on PATH.
 
 ### Step 2: clone + build (all platforms)
 
@@ -246,27 +316,49 @@ make test_sound    # audio mixer unit tests
 
 ```
 sx-doom-overlay/
-├── source/                           ← our overlay shim (C++26)
-│   ├── main.cpp                      ← tsl::Overlay + tsl::Gui + tsl::Element
-│   ├── blit.{cpp,hpp}                ← palette → RGBA4444 + integer-scale upscaler
-│   ├── audio_mixer.{c,h}             ← 8-channel SFX mixer
-│   ├── audio_backend.h               ← abstract sink interface
-│   └── audio_backend_libnx.c         ← production libnx audout backend
-├── lib/                              ← build dependencies (git submodules)
-│   ├── libultrahand/                 ← libtesla + libultra (overlay framework)
-│   └── doomgeneric/                  ← Doom engine (Chocolate Doom fork)
-├── patches/                          ← surgical patches against doomgeneric
-│   ├── 0001-lower-min-ram.patch      ← MIN_RAM 6→3 MiB (8 MB heap budget)
-│   └── 0002-patch-exit-sites.patch   ← exit() → longjmp (overlay survival)
-├── tests/desktop/                    ← Linux unit tests (no Switch needed)
-├── scripts/                          ← install-devkitpro.sh, apply-patches.sh,
-│                                       fetch-freedoom.sh, check-ovl-size.sh,
-│                                       dist.sh
+├── source/                              ← overlay shim + audio backends (C++26 / C99)
+│   ├── main.cpp                         ← libtesla overlay UI + engine lifecycle
+│   ├── elm_ultradoomframe.hpp           ← header element (DOOM banner + version)
+│   ├── blit.{cpp,hpp}                   ← palette → RGBA4444 + integer-scale upscaler
+│   ├── input_map.hpp                    ← Switch buttons → Doom keys
+│   ├── audio_mixer.{c,h}                ← 8-channel SFX mixer (active-channel averaging)
+│   ├── audio_backend{,_libnx}.{c,h}     ← libnx audout backend
+│   ├── i_sound_switch.c                 ← engine-side SFX bridge + DMX decode + cache
+│   ├── music_ogg.{c,h}                  ← stb_vorbis OGG decoder + per-WAD lookup
+│   │                                       + OPL fallback dispatcher
+│   ├── stb_vorbis_impl.h                ← vendored stb_vorbis (renamed .h on purpose)
+│   └── opl/                             ← vendored Nuked-OPL3 + chocolate-doom MIDI player
+├── lib/                                 ← build dependencies (git submodules)
+│   ├── libultrahand/                    ← libtesla + libultra (overlay framework)
+│   └── doomgeneric/                     ← Doom engine (chocolate-doom fork)
+├── patches/0001..0008-*.patch           ← surgical patches against doomgeneric
+│                                          (lower MIN_RAM, exit→longjmp, faster turn,
+│                                           per-WAD savegames, ENDOOM no-op,
+│                                           bypass loop interface, decouple sound module)
+├── tests/desktop/                       ← Linux unit tests (no Switch needed)
+├── scripts/
+│   ├── install-devkitpro.{sh,ps1}       ← bootstrap toolchain (Linux + Windows)
+│   ├── setup-windows.ps1                ← one-shot install + submodules + first build
+│   ├── apply-patches.sh                 ← idempotent patch applier (CRLF-tolerant)
+│   ├── fetch-freedoom.sh                ← bundled WAD download
+│   ├── fetch-chex-music.sh              ← Arachno Chex Quest OGG pack
+│   ├── extract-wad-music.py             ← MUS → MIDI → OGG offline renderer
+│   ├── sync-sd.sh + mtp-sync.ps1        ← deploy .ovl + pull diagnostics
+│   ├── check-ovl-size.sh + dist.sh      ← release zip + size sanity
+├── data/
+│   ├── wads/                            ← drop your WADs here (gitignored)
+│   ├── music/<wad-stem>/                ← OGG packs per WAD (gitignored)
+│   ├── freedoom1.wad → wads/            ← bundled at release via dist.sh
+│   └── LICENSE.freedoom                 ← BSD-3 attribution
 ├── docs/
-│   ├── prd/2026-04-25-doom-overlay.md   ← product spec
-│   └── plans/2026-04-25-doom-overlay.md ← implementation plan (12 tasks)
-├── data/                             ← bundled at release time (freedoom1.wad)
-└── Makefile                          ← cross-compile to .ovl
+│   ├── prd/                             ← product specs
+│   └── plans/                           ← implementation plans
+├── build-<platform>/                    ← gcc intermediates (gitignored)
+├── out-<platform>/sx-doom-overlay.ovl   ← final build output (gitignored)
+├── Makefile                             ← cross-compile to .ovl (uname-based BUILD/OUT)
+├── CLAUDE.md                            ← guidance for AI assistants in this repo
+├── .gitattributes                       ← LF for *.patch/*.sh, CRLF for *.ps1
+└── .gitmodules                          ← submodule config (ignore=dirty for doomgeneric)
 ```
 
 ---

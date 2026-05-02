@@ -108,6 +108,48 @@ dos2unix patches/*.patch     # if dos2unix is available
 git ls-files -z patches/*.patch | xargs -0 -I{} sh -c 'tr -d "\r" < {} > {}.tmp && mv {}.tmp {}'
 ```
 
+## Required devkitPro portlibs (curl + zlib + mbedtls)
+
+The build links against `-lcurl -lz -lmbedtls -lmbedx509 -lmbedcrypto`
+because libultrahand pulls in curl for its online-updater code path
+(compiled even though we don't use that feature). The base devkitPro
+toolchain doesn't ship these.
+
+Both supported install scripts pull them automatically:
+  - `scripts/install-devkitpro.sh` (Linux): `dkp-pacman -S switch-dev
+    switch-curl switch-zlib switch-mbedtls`
+  - `scripts/install-devkitpro.ps1` (Windows): runs the GUI installer
+    for the toolchain, then `pacman -S switch-curl switch-zlib
+    switch-mbedtls --noconfirm` after.
+
+**Symptom of missing portlibs:** mid-build, partway through compiling
+`source/audio_lock.cpp`, the build dies with:
+```
+fatal error: curl/curl.h: No such file or directory
+```
+That's the smoking gun — install the portlibs and re-run `make`. From
+any shell where `pacman` is on PATH:
+```
+pacman -S switch-curl switch-zlib switch-mbedtls --noconfirm
+```
+If `pacman` isn't on PATH on Windows, the absolute path is
+`C:\devkitPro\msys2\usr\bin\pacman.exe`.
+
+## Stale build cache when alternating shells
+
+Per-platform `build-<platform>/` and `out-<platform>/` dirs prevent the
+worst case (gcc-emitted `.d` files with absolute paths from one shell
+breaking `make` invoked from another). But if a user's checkout still
+has a legacy plain `build/` or `out/` from before this layout, the
+stale paths bleed through. Symptom: `make` errors with
+```
+make[1]: *** No rule to make target '/mnt/c/.../source/foo.c',
+        needed by 'foo.o'.  Stop.
+```
+or any other `/mnt/c/...` reference in a PowerShell session, or any
+`C:/Users/...` reference in a WSL session. Diagnosis = stale cache,
+not bad source. Fix: `make clean` once, then `make`.
+
 ## Common Claude failure modes to avoid
 
 1. **Telling a Windows-native user to "open WSL and run `make`".** They don't
