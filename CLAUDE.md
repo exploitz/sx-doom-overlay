@@ -64,6 +64,11 @@ on native Windows with devkitPro installed at `C:\devkitPro`, or in WSL/Linux?"
 - `make clean` blows away ALL `build-*/` and `out-*/` dirs (and any legacy
   `build/` or `out/`) plus the patch sentinel.
 - Submodules: `git submodule update --init --recursive` after first clone.
+  After pulling a `.gitmodules` change (e.g. the `ignore = dirty` setting
+  for `lib/doomgeneric` that suppresses "modified content" noise on every
+  `git status`), existing clones must run `git submodule sync` once to
+  copy the new config into `.git/config`. New clones pick it up
+  automatically.
 - The Makefile invokes `bash scripts/*.sh` for patches and dist. This works
   in WSL, Linux, macOS, and **devkitPro's MSys2 shell on Windows**.
 - Setup is split by platform — pick the right one when guiding a user:

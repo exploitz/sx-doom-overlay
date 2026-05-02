@@ -45,8 +45,34 @@ Set-Location $Root
 
 if ($SkipDevKitPro) {
     Bold "Skipping devkitPro install (--SkipDevKitPro)"
+    # User skipped the toolchain step but still might be missing the
+    # portlibs (switch-curl, switch-zlib, switch-mbedtls) that the build
+    # links against. Without these the build dies on 'curl/curl.h: No
+    # such file' partway through. Run pacman to ensure they're present;
+    # --needed makes this a fast no-op if already installed.
+    Bold "Verifying portlibs (switch-curl + switch-zlib + switch-mbedtls)"
+    $Pacman = $null
+    foreach ($candidate in @(
+        'C:\devkitPro\msys2\usr\bin\pacman.exe',
+        'pacman',
+        'dkp-pacman'
+    )) {
+        $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($cmd) { $Pacman = $cmd.Source; break }
+    }
+    if ($Pacman) {
+        & $Pacman -Sy --needed --noconfirm switch-curl switch-zlib switch-mbedtls
+        if ($LASTEXITCODE -ne 0) {
+            Err "pacman returned exit $LASTEXITCODE -- portlibs may not have installed."
+            Err "Manual fix:  pacman -S switch-curl switch-zlib switch-mbedtls --noconfirm"
+        }
+    } else {
+        Err "pacman not found -- can't verify portlibs."
+        Err "If 'make' later fails on 'curl/curl.h', open devkitPro MSys2 and run:"
+        Err "    pacman -S switch-curl switch-zlib switch-mbedtls --noconfirm"
+    }
 } else {
-    Bold "Step 1/4 -- devkitPro toolchain"
+    Bold "Step 1/4 -- devkitPro toolchain (and portlibs)"
     & (Join-Path $ScriptDir "install-devkitpro.ps1")
     if ($LASTEXITCODE -ne 0) {
         Err "install-devkitpro.ps1 failed (exit $LASTEXITCODE). Stopping."

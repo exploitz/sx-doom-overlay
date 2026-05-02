@@ -181,8 +181,10 @@ if (-not $Pacman) {
     Warn "        pacman -S switch-curl switch-zlib switch-mbedtls --noconfirm"
 } else {
     Write-Host "    Using pacman at $Pacman"
+    # -Sy refreshes the package db first (in case devkitPro repo metadata
+    # has been updated since the GUI installer last synced it).
     # --needed skips already-installed packages; --noconfirm skips prompts.
-    & $Pacman -S --needed --noconfirm switch-curl switch-zlib switch-mbedtls
+    & $Pacman -Sy --needed --noconfirm switch-curl switch-zlib switch-mbedtls
     if ($LASTEXITCODE -ne 0) {
         Warn "pacman returned exit $LASTEXITCODE -- some packages may not have installed."
         Warn "If the build later fails on 'curl/curl.h: No such file', install"
