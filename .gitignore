@@ -18,8 +18,10 @@ dist/
 # Patch sentinel — produced by `make patches`, blown away on `make clean`
 lib/doomgeneric/.patched
 
-# WAD files — copyrighted (DOOM, CHEX) or BSD-3 (Freedoom). Drop your own
-# copies into data/wads/. Not tracked in git. The .gitkeep keeps the dir.
+# WAD files anywhere under data/ — copyrighted IWADs (DOOM, CHEX),
+# BSD-3 (Freedoom), GENMIDI instrument banks. Drop your own copies
+# into data/wads/. Not tracked in git. The .gitkeep keeps the dir.
+data/*.wad
 data/wads/*.wad
 !data/wads/.gitkeep
 
@@ -36,7 +38,7 @@ tests/desktop/*.wav
 tests/desktop/*.ppm
 tests/desktop/*.png
 
-# Editor / OS
+# Editor / OS / IDE
 .vscode/
 .idea/
 *.swp
@@ -44,6 +46,27 @@ tests/desktop/*.png
 *~
 .DS_Store
 Thumbs.db
+desktop.ini
+*.lnk
+
+# Tooling intermediates that some editors / language servers spit out at the
+# repo root — clangd, ctags, etc. Not worth checking in.
+compile_commands.json
+.cache/
+tags
+.tags
+cscope.*
+
+# Local environment overrides — never commit secrets or per-machine paths.
+.env
+.env.local
+.env.*.local
+
+# Generic stray scratch files
+*.tmp
+*.bak
+*.orig
+*.rej
 
 # Pilot internals
 .pilot/
