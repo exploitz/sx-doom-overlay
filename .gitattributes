@@ -1,0 +1,58 @@
+# Enforce LF line endings on Unix-format files regardless of the
+# contributor's git config (Windows defaults core.autocrlf=true, which
+# rewrites these to CRLF on checkout and breaks bash/git apply).
+#
+# Symptoms this prevents:
+#   - "git apply: patch does not apply" on patches/*.patch even though
+#     the patch is correct, because git sees CRLF in the patch text and
+#     fails its line-by-line context match.
+#   - "/bin/bash^M: bad interpreter" when bash tries to run scripts/*.sh
+#     with carriage-return contamination on the shebang line.
+#
+# After adding/changing this file, an existing clone may still have CRLF
+# in its working tree. Re-normalize with:
+#     git rm --cached -r .
+#     git reset --hard
+
+* text=auto
+
+# Bash and patch files MUST be LF.
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.patch text eol=lf
+
+# Makefile-family files MUST be LF (tabs are also significant — make
+# treats CRLF tabs as broken indentation in some implementations).
+Makefile  text eol=lf
+*.mk      text eol=lf
+
+# C/C++ source — keep LF for cross-platform diff cleanliness.
+*.c   text eol=lf
+*.h   text eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+
+# PowerShell scripts can be either, but CRLF is the Windows convention
+# and is what notepad.exe / VS Code default to. Force CRLF so editing
+# them on Windows doesn't introduce mixed line endings.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+
+# Markdown / text — let git auto-detect (default is fine).
+*.md  text
+*.txt text
+
+# Binary blobs — never touch.
+*.wad     binary
+*.ovl     binary
+*.nro     binary
+*.nso     binary
+*.nacp    binary
+*.elf     binary
+*.png     binary
+*.jpg     binary
+*.ogg     binary
+*.wav     binary
+*.zip     binary
+*.pk3     binary
+*.sf2     binary

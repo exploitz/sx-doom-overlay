@@ -69,31 +69,40 @@ if [ -f "$SENTINEL" ]; then
     cd - >/dev/null
 fi
 
+# Pre-process each patch through `tr -d '\r'` to strip CRLF on the fly.
+# Background: Windows git with core.autocrlf=true rewrites checked-out
+# `*.patch` files to CRLF; `git apply` then sees CR mismatches against
+# the LF-checked-out source and refuses with "patch does not apply".
+# Stripping CR at apply-time fixes existing dirty clones; the new
+# .gitattributes file fixes future clones.
 cd "$TARGET_DIR"
 for p in "${PATCH_FILES[@]}"; do
     NAME=$(basename "$p")
     # If the patch's reverse applies cleanly, it's already applied.
     # If forward applies cleanly, apply it.
     # If neither, it's broken (e.g., submodule HEAD moved past it).
-    if git apply -R --check "$p" 2>/dev/null; then
+    if tr -d '\r' < "$p" | git apply -R --check 2>/dev/null; then
         echo "[apply-patches] $NAME already applied — skip"
         continue
     fi
-    if git apply --check "$p" 2>/dev/null; then
+    if tr -d '\r' < "$p" | git apply --check 2>/dev/null; then
         echo "[apply-patches] applying $NAME"
-        if ! git apply "$p"; then
+        if ! tr -d '\r' < "$p" | git apply; then
             echo "ERROR: git apply failed for $NAME (check passed but apply failed — this should not happen)" >&2
             exit 1
         fi
         continue
     fi
-    # Neither forward nor reverse applies cleanly — the patch is broken.
+    # Neither forward nor reverse applies cleanly — actually broken.
     echo "" >&2
     echo "ERROR: patch $NAME does not apply cleanly to lib/doomgeneric, and is not already applied either." >&2
-    echo "       The submodule HEAD may have moved. Re-roll the patch:" >&2
-    echo "         cd $TARGET_DIR" >&2
-    echo "         # apply changes manually, then:" >&2
-    echo "         git diff > $p" >&2
+    echo "       Most likely causes:" >&2
+    echo "         1. lib/doomgeneric submodule is on the wrong commit." >&2
+    echo "            Fix: git submodule update --init --recursive" >&2
+    echo "         2. The patch file itself was edited / corrupted." >&2
+    echo "            Fix: git checkout -- $p" >&2
+    echo "         3. doomgeneric upstream moved and the patch needs re-rolling." >&2
+    echo "            Re-roll: cd $TARGET_DIR; <apply changes manually>; git diff > $p" >&2
     echo "" >&2
     exit 1
 done

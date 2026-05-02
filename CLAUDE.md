@@ -74,6 +74,34 @@ on native Windows with devkitPro installed at `C:\devkitPro`, or in WSL/Linux?"
   `.ps1` install to a Linux user. Each script bails early on the wrong
   platform, but pointing at the wrong one is still wasted time.
 
+## Windows clones: CRLF gotcha (the doomgeneric patch failure)
+
+If a Windows user reports `make` failing during `apply-patches.sh` with
+"patch does not apply" or "submodule HEAD may have moved" — the actual
+cause is almost always **CRLF line endings on the `.patch` files**. Git
+on Windows defaults to `core.autocrlf=true`, which rewrites checked-out
+text files (including `*.patch`) with Windows line endings; `git apply`
+then sees CR mismatches against the LF-checked-out source and refuses.
+
+This was Ethan's original blocker. The repo now ships:
+  - `.gitattributes` enforcing `eol=lf` on `*.patch`, `*.sh`, Makefile,
+    and source files (so future clones don't repeat the problem).
+  - `scripts/apply-patches.sh` pipes each patch through `tr -d '\r'`
+    before `git apply` (so existing dirty clones still work).
+
+**Existing clone showing the bug:** run once to re-normalize the
+working tree:
+```
+git rm --cached -r .
+git reset --hard
+```
+Or to fix only the patch files in place without touching anything else:
+```
+dos2unix patches/*.patch     # if dos2unix is available
+# or:
+git ls-files -z patches/*.patch | xargs -0 -I{} sh -c 'tr -d "\r" < {} > {}.tmp && mv {}.tmp {}'
+```
+
 ## Common Claude failure modes to avoid
 
 1. **Telling a Windows-native user to "open WSL and run `make`".** They don't
