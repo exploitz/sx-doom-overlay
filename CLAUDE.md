@@ -21,7 +21,7 @@ do not push the other path.**
 
 | User environment | Reality |
 |---|---|
-| Native Windows + devkitPro Updater install | devkitPro lives at `C:\devkitPro`. The bundled **MSys2 shell** (Start Menu → "devkitPro MSys2") has bash, make, tar, wget — every `scripts/*.sh` runs there unmodified. PowerShell/cmd cannot run `.sh` directly; launch MSys2 first. **DO NOT suggest WSL, `/opt/devkitpro`, `sudo apt`, or `/mnt/c/...` paths.** |
+| Native Windows + devkitPro Updater install | devkitPro lives at `C:\devkitPro`. The installer adds `make`, `bash`, `git`, and the cross-toolchain to the system `PATH`, so **`make` works from any Windows shell** — PowerShell, cmd, Windows Terminal, or the bundled "devkitPro MSys2". The Makefile invokes `bash scripts/*.sh` internally, which resolves through that PATH. **DO NOT suggest WSL, `/opt/devkitpro`, `sudo apt`, or `/mnt/c/...` paths.** Repo path is `C:\Users\<name>\…` not `/mnt/c/Users/<name>/…`. |
 | Linux native | devkitPro at `/opt/devkitpro`, set up via `scripts/install-devkitpro.sh` (Debian/Ubuntu only). Standard bash everywhere. |
 | WSL2 (Ubuntu under Windows) | Linux conventions. Repo paths look like `/mnt/c/Users/<name>/dev/sx-doom-overlay/`. **DO NOT** assume this is the universal layout — Ethan's clone is at `D:\Users\ereid\Documents\Ethans-Claude-Projects\UltraDoom\sx-doom-overlay\` on native Windows, not under `/mnt/c/`. |
 | macOS | devkitPro via dkp-pacman. Bash works. Same Makefile path as Linux. |
@@ -37,9 +37,14 @@ echo "$WSL_DISTRO_NAME"      # set only inside WSL
 pwd                          # /mnt/c/... = WSL,  /c/... = MSys2,  /home/... = Linux,  C:\... = PowerShell
 ```
 
-If the user's shell is PowerShell (`$PSVersionTable` exists, paths use
-backslashes), don't suggest `bash`/`sudo apt`/`./scripts/foo.sh`. Either
-suggest launching the MSys2 shell first, or write a PowerShell equivalent.
+If the user's shell is PowerShell or cmd on native Windows, **`make`
+itself still works** because devkitPro adds `make` and `bash` to PATH —
+the Makefile dispatches to `bash scripts/*.sh` and that resolves through
+PATH transparently. What you should NOT do:
+  - Suggest `sudo apt …` (no apt on Windows)
+  - Suggest `./scripts/foo.sh` invocation patterns where the leading `./`
+    or shebang gets misinterpreted — call `bash scripts/foo.sh` instead
+  - Suggest `wslpath`, `/mnt/c/`, or any other WSL-isms
 
 If you can't tell from context — **ask the user**, don't guess. "Are you
 on native Windows with devkitPro installed at `C:\devkitPro`, or in WSL/Linux?"
@@ -62,9 +67,10 @@ on native Windows with devkitPro installed at `C:\devkitPro`, or in WSL/Linux?"
 ## Common Claude failure modes to avoid
 
 1. **Telling a Windows-native user to "open WSL and run `make`".** They don't
-   have WSL installed. devkitPro on Windows is a **first-class supported
-   path**. Tell them to open the "devkitPro MSys2" shell from the Start Menu
-   and run `make` there.
+   have WSL installed and don't need it. devkitPro on Windows puts `make`
+   and `bash` directly on `PATH`, so `make` works from PowerShell, cmd,
+   Windows Terminal, or the devkitPro MSys2 shell — pick whichever they
+   already have open.
 2. **Suggesting `/opt/devkitpro` paths to Windows-native users.** Their
    install is at `C:\devkitPro` (= `/c/devkitPro/` in MSys2).
 3. **Pasting `/mnt/c/...` paths into instructions.** That's a WSL-only

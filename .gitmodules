@@ -4,3 +4,9 @@
 [submodule "lib/doomgeneric"]
 	path = lib/doomgeneric
 	url = https://github.com/ozkl/doomgeneric.git
+	# `make patches` applies patches/*.patch to this submodule's working
+	# tree, which leaves it permanently "dirty" from git's perspective even
+	# though the commit pointer is unchanged. Without this, every git status
+	# shows ` m lib/doomgeneric` as noise. We only care about the pointer
+	# moving (a tracked change) — not local edits inside the working tree.
+	ignore = dirty

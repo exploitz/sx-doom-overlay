@@ -180,14 +180,16 @@ Pick the path that matches your OS:
 
 | OS | How |
 |---|---|
-| **Windows native** | Run the [devkitPro Windows installer](https://github.com/devkitPro/installer/releases). It puts everything at `C:\devkitPro\` and sets `DEVKITPRO` for you. After install, all subsequent build steps run inside the **"devkitPro MSys2"** shell (Start Menu → "devkitPro MSys2"), which has bash + make + tar + wget bundled. **Do NOT need WSL.** |
+| **Windows native** | Run the [devkitPro Windows installer](https://github.com/devkitPro/installer/releases). It puts everything at `C:\devkitPro\` and adds `make` + `bash` + the cross-toolchain to `PATH`. **`make` then works from any shell** — PowerShell, cmd, Windows Terminal, or the bundled "devkitPro MSys2". WSL is not required. |
 | **Linux (Debian/Ubuntu/WSL2)** | `sudo ./scripts/install-devkitpro.sh` (apt-based). Installs to `/opt/devkitpro/`. |
 | **macOS / other Linux** | Follow [devkitPro pacman docs](https://devkitpro.org/wiki/devkitPro_pacman) directly — install pacman, then `sudo dkp-pacman -S switch-dev`. |
 
 ### Step 2: clone + build (all platforms)
 
-Run these inside your platform's bash-capable shell (devkitPro MSys2 on
-Windows; bash directly on Linux/WSL/macOS):
+The commands below assume bash syntax. On Windows, run them in any shell
+where `make` is on PATH (PowerShell, cmd, Windows Terminal, or devkitPro
+MSys2 — all work, since the devkitPro installer wires up bash + make
+globally). On Linux/WSL/macOS, bash directly:
 
 ```bash
 # Clone with submodules
