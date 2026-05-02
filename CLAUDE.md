@@ -60,9 +60,19 @@ on native Windows with devkitPro installed at `C:\devkitPro`, or in WSL/Linux?"
 - Submodules: `git submodule update --init --recursive` after first clone.
 - The Makefile invokes `bash scripts/*.sh` for patches and dist. This works
   in WSL, Linux, macOS, and **devkitPro's MSys2 shell on Windows**.
-- `scripts/install-devkitpro.sh` is **Debian/WSL/Linux only**. On Windows,
-  use the [official devkitPro installer](https://github.com/devkitPro/installer/releases)
-  instead. Do not suggest the install script to Windows-native users.
+- Setup is split by platform — pick the right one when guiding a user:
+  - **Windows native** → `scripts\install-devkitpro.ps1` (PowerShell;
+    fetches latest installer from GitHub, runs interactively) OR
+    `scripts\setup-windows.ps1` (full bootstrap: install + submodules +
+    Freedoom fetch + first build, with `-Skip*` flags for partial runs).
+  - **Linux / WSL2 (Debian/Ubuntu)** → `scripts/install-devkitpro.sh`
+    (apt-based, requires sudo).
+  - **macOS / other Linux** → manual via dkp-pacman per
+    https://devkitpro.org/wiki/devkitPro_pacman.
+
+  Never suggest the `.sh` install to a Windows user, never suggest the
+  `.ps1` install to a Linux user. Each script bails early on the wrong
+  platform, but pointing at the wrong one is still wasted time.
 
 ## Common Claude failure modes to avoid
 
