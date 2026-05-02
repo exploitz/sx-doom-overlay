@@ -8,7 +8,7 @@
 #   2. git submodule update      -- pulls libultrahand + doomgeneric
 #   3. bash scripts\fetch-freedoom.sh  -- optional bundled WAD (only if
 #                                         data\wads\freedoom1.wad missing)
-#   4. make                      -- produces out\sx-doom-overlay.ovl
+#   4. make                      -- produces out-win\sx-doom-overlay.ovl
 #
 # Usage:
 #   PS> Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
@@ -117,7 +117,15 @@ Bold "Step 4/4 -- make"
 & make
 if ($LASTEXITCODE -ne 0) { Err "make failed"; exit $LASTEXITCODE }
 
-$OvlPath = Join-Path $Root "out\sx-doom-overlay.ovl"
+# Makefile auto-detects PLATFORM via uname; from PowerShell + devkitPro
+# bundled make, that resolves to MINGW* -> 'win'. Mirror the same logic
+# here so we can locate the freshly-built .ovl.
+$OvlPath = Join-Path $Root "out-win\sx-doom-overlay.ovl"
+if (-not (Test-Path $OvlPath)) {
+    # Fall back to legacy out/ path in case the Makefile's namespacing
+    # ever gets disabled (or for dirs predating this change).
+    $OvlPath = Join-Path $Root "out\sx-doom-overlay.ovl"
+}
 if (Test-Path $OvlPath) {
     $size = [math]::Round((Get-Item $OvlPath).Length / 1KB, 0)
     Bold "Done -- built $OvlPath ($size KB)"

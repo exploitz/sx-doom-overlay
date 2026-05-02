@@ -54,9 +54,15 @@ on native Windows with devkitPro installed at `C:\devkitPro`, or in WSL/Linux?"
 - `DEVKITPRO` env var must be set. On Windows-native with the official
   installer this is set automatically by the installer. On Linux it's set
   by `/etc/profile.d/devkit-env.sh`.
-- `make` from the repo root produces `out/sx-doom-overlay.ovl`.
+- `make` from the repo root produces `out-<platform>/sx-doom-overlay.ovl`,
+  where `<platform>` is `win` (MSys2/Cygwin/MinGW), `linux` (Linux/WSL),
+  `mac` (Darwin), or `unknown`. Same checkout can be built from multiple
+  shells in parallel — each writes to its own `build-<platform>/` and
+  `out-<platform>/` so the gcc-emitted `.d` dependency files (which
+  contain absolute paths) from one platform don't break the other.
 - `make patches` applies `patches/*.patch` to `lib/doomgeneric/` (idempotent).
-- `make clean` blows away `build/` and `out/`.
+- `make clean` blows away ALL `build-*/` and `out-*/` dirs (and any legacy
+  `build/` or `out/`) plus the patch sentinel.
 - Submodules: `git submodule update --init --recursive` after first clone.
 - The Makefile invokes `bash scripts/*.sh` for patches and dist. This works
   in WSL, Linux, macOS, and **devkitPro's MSys2 shell on Windows**.

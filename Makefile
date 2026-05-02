@@ -2,15 +2,19 @@
 # Makefile for sx-doom-overlay
 #
 # Two-pass devkitPro homebrew structure (standard pattern):
-#   - First pass (from project root): set up vars, ensure build dir, recurse
-#     into build/ with itself as the Makefile.
-#   - Second pass (from inside build/): the actual compile rules driven by
-#     libnx's switch_rules.
+#   - First pass (from project root): set up vars, ensure build-<platform>
+#     exists, then recurse into build-<platform>/ with this Makefile.
+#   - Second pass (from inside build-<platform>/): the actual compile rules
+#     driven by libnx's switch_rules.
+#
+# build-<platform>/ and out-<platform>/ are auto-namespaced per host so
+# the same checkout can be built from WSL ('linux') and PowerShell ('win')
+# without the .d cache from one breaking the other.
 #
 # Targets (top level):
-#   make           build out/sx-doom-overlay.ovl
+#   make           build out-<platform>/sx-doom-overlay.ovl
 #   make patches   apply patches/*.patch to lib/doomgeneric (idempotent)
-#   make clean     remove build/ and out/
+#   make clean     remove ALL build-* and out-* dirs
 #   make dist      assemble dist/sx-doom-overlay-<version>.zip
 #
 # Licensed under GPLv2.
@@ -46,7 +50,27 @@ else
 APP_TITLE   := Doom ($(GIT_BRANCH))
 endif
 TARGET      := sx-doom-overlay
-BUILD       := build
+
+# Platform-namespaced build + output dirs. The intermediate .d files emitted
+# by gcc contain absolute source paths (/mnt/c/... under WSL, C:/... under
+# native Windows MSys2), so a build/ dir produced from one shell breaks
+# 'make' from another shell against the same checkout. Namespacing both
+# dirs lets contributors who alternate between WSL and native Windows
+# keep two valid build caches side by side without 'make clean' between
+# every platform switch.
+UNAME_S := $(shell uname -s 2>/dev/null)
+ifneq (,$(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)))
+PLATFORM := win
+else ifeq ($(UNAME_S),Darwin)
+PLATFORM := mac
+else ifeq ($(UNAME_S),Linux)
+PLATFORM := linux
+else
+PLATFORM := unknown
+endif
+
+BUILD       := build-$(PLATFORM)
+OUT         := out-$(PLATFORM)
 SOURCES     := source source/opl
 INCLUDES    := source source/opl include
 NO_ICON     := 1
@@ -126,7 +150,7 @@ ifneq ($(BUILD),$(notdir $(CURDIR)))
 # emulation (otherwise system /usr/bin/ld gets invoked and chokes on `tp=soft`).
 export LD := $(CXX)
 
-export OUTPUT  := $(CURDIR)/out/$(TARGET)
+export OUTPUT  := $(CURDIR)/$(OUT)/$(TARGET)
 export TOPDIR  := $(CURDIR)
 
 # Doomgeneric source set — exclude platform shims and SDL/Allegro audio.
@@ -181,11 +205,13 @@ all: $(BUILD)
 
 $(BUILD): $(PATCH_SENTINEL)
 	@[ -d $@ ] || mkdir -p $@
-	@[ -d out ] || mkdir -p out
+	@[ -d $(OUT) ] || mkdir -p $(OUT)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
+# clean wipes ALL platform variants, not just the current one — keeps things
+# tidy if you previously built on a different platform against this checkout.
 clean:
-	@rm -rf $(BUILD) out $(PATCH_SENTINEL)
+	@rm -rf build build-* out out-* $(PATCH_SENTINEL)
 	@echo "[clean] removed build artifacts (patch sentinel cleared)"
 
 dist: all

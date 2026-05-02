@@ -28,7 +28,18 @@ VERSION="$1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-OVL_PATH="$ROOT/out/sx-doom-overlay.ovl"
+# Resolve out-<platform>/ produced by Makefile (with legacy out/ fallback).
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) PLATFORM=win ;;
+    Darwin)               PLATFORM=mac ;;
+    Linux)                PLATFORM=linux ;;
+    *)                    PLATFORM=unknown ;;
+esac
+if [ -f "$ROOT/out-$PLATFORM/sx-doom-overlay.ovl" ]; then
+    OVL_PATH="$ROOT/out-$PLATFORM/sx-doom-overlay.ovl"
+else
+    OVL_PATH="$ROOT/out/sx-doom-overlay.ovl"   # legacy layout fallback
+fi
 WAD_PATH="$ROOT/data/wads/freedoom1.wad"
 LICENSE_PATH="$ROOT/data/LICENSE.freedoom"
 README_PATH="$ROOT/README.md"

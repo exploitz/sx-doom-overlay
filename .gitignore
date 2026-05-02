@@ -1,6 +1,10 @@
-# Build artifacts
+# Build artifacts. Per-platform namespaced dirs (build-win, build-linux,
+# out-win, out-linux, etc) so the same checkout can be built from
+# multiple shells without cross-contamination.
 build/
+build-*/
 out/
+out-*/
 dist/
 *.elf
 *.nro

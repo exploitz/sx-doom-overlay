@@ -201,7 +201,10 @@ cd sx-doom-overlay
 
 # Build (patches auto-apply via Makefile dependency)
 make
-# Output: out/sx-doom-overlay.ovl
+# Output: out-<platform>/sx-doom-overlay.ovl
+#         (out-win/, out-linux/, or out-mac/ — auto-detected via uname so
+#          you can build from WSL and PowerShell against the same checkout
+#          without 'make clean' between switches)
 
 # Build release zip
 make dist

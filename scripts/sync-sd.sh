@@ -27,7 +27,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-OVL_PATH="$ROOT/out/sx-doom-overlay.ovl"
+# Resolve the platform-namespaced out dir produced by `make`. Mirrors the
+# detection logic at the top of the Makefile: out-win on MSys2/Cygwin/MinGW,
+# out-mac on Darwin, out-linux on Linux/WSL, out-unknown otherwise. We also
+# fall back to plain `out/` if the user is still on an old build layout.
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) PLATFORM=win ;;
+    Darwin)               PLATFORM=mac ;;
+    Linux)                PLATFORM=linux ;;
+    *)                    PLATFORM=unknown ;;
+esac
+if [ -f "$ROOT/out-$PLATFORM/sx-doom-overlay.ovl" ]; then
+    OVL_PATH="$ROOT/out-$PLATFORM/sx-doom-overlay.ovl"
+elif [ -f "$ROOT/out/sx-doom-overlay.ovl" ]; then
+    OVL_PATH="$ROOT/out/sx-doom-overlay.ovl"
+else
+    OVL_PATH="$ROOT/out-$PLATFORM/sx-doom-overlay.ovl"   # canonical missing-file path
+fi
 WAD_PATH="$ROOT/data/wads/freedoom1.wad"
 LICENSE_PATH="$ROOT/data/LICENSE.freedoom"
 DIAG_BASE="$ROOT/diagnostics"
