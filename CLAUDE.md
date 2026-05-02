@@ -23,7 +23,7 @@ do not push the other path.**
 |---|---|
 | Native Windows + devkitPro Updater install | devkitPro lives at `C:\devkitPro`. The installer adds `make`, `bash`, `git`, and the cross-toolchain to the system `PATH`, so **`make` works from any Windows shell** — PowerShell, cmd, Windows Terminal, or the bundled "devkitPro MSys2". The Makefile invokes `bash scripts/*.sh` internally, which resolves through that PATH. **DO NOT suggest WSL, `/opt/devkitpro`, `sudo apt`, or `/mnt/c/...` paths.** Repo path is `C:\Users\<name>\…` not `/mnt/c/Users/<name>/…`. |
 | Linux native | devkitPro at `/opt/devkitpro`, set up via `scripts/install-devkitpro.sh` (Debian/Ubuntu only). Standard bash everywhere. |
-| WSL2 (Ubuntu under Windows) | Linux conventions. Repo paths look like `/mnt/c/Users/<name>/dev/sx-doom-overlay/`. **DO NOT** assume this is the universal layout — Ethan's clone is at `D:\Users\ereid\Documents\Ethans-Claude-Projects\UltraDoom\sx-doom-overlay\` on native Windows, not under `/mnt/c/`. |
+| WSL2 (Ubuntu under Windows) | Linux conventions. Repo paths look like `/mnt/c/Users/<name>/dev/sx-doom-overlay/`. **DO NOT** assume this is the universal layout — a contributor's clone is at `<contributor's local checkout>` on native Windows, not under `/mnt/c/`. |
 | macOS | devkitPro via dkp-pacman. Bash works. Same Makefile path as Linux. |
 
 ### How to know which environment you're in
@@ -94,7 +94,7 @@ on Windows defaults to `core.autocrlf=true`, which rewrites checked-out
 text files (including `*.patch`) with Windows line endings; `git apply`
 then sees CR mismatches against the LF-checked-out source and refuses.
 
-This was Ethan's original blocker. The repo now ships:
+This was a contributor's original blocker. The repo now ships:
   - `.gitattributes` enforcing `eol=lf` on `*.patch`, `*.sh`, Makefile,
     and source files (so future clones don't repeat the problem).
   - `scripts/apply-patches.sh` pipes each patch through `tr -d '\r'`

@@ -7,7 +7,7 @@ Snapshot for resuming after context clear or branch switch.
 ```
 main                       b2a0fb6
   └── full integrated build:
-        SFX + OPL music + Ethan UI + savestate UX + QUICK SAVE/LOAD slot 7
+        SFX + OPL music + the contributor UI + savestate UX + QUICK SAVE/LOAD slot 7
 
 feat/task-9b-ogg-music     9f4e73b  (rebased on top of main)
   └── adds:
@@ -18,8 +18,8 @@ feat/task-9b-ogg-music     9f4e73b  (rebased on top of main)
         last commit: "diag: bracket submit thread with iter counters around music paths"
 
 feat/task-9-music          stale, merged to main, can delete
-feat/integrate-ethan-v2    stale, merged to main, can delete
-feat/integrate-ethan       stale, v1 attempt, can delete
+feat/integrate-ui-v2    stale, merged to main, can delete
+feat/integrate-ui       stale, v1 attempt, can delete
 ```
 
 ## Open tasks
@@ -71,10 +71,10 @@ and the post-decode crash from earlier is resolved.
 - Music: DG_music_module aliased to music_opl_module (main) or music_ogg_module (OGG branch)
 - Patches: 8 total, applied via `./scripts/apply-patches.sh` BEFORE `make`. Foot-gun: `make all` doesn't auto-apply (task #65)
 
-## What Ethan needs to do for a working build
+## What the contributor needs to do for a working build
 
 ```bash
-git clone https://github.com/exploitz/sx-doom-overlay.git
+git clone https://github.com/<your-org>/sx-doom-overlay.git
 cd sx-doom-overlay
 git submodule update --init --recursive
 ./scripts/apply-patches.sh    # critical — must run before make

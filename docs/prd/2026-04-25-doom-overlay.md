@@ -7,7 +7,7 @@ type: prd
 # Doom Overlay
 
 Created: 2026-04-25
-Author: gober.chase@gmail.com
+Author: <redacted>
 Category: Feature
 Status: Draft
 Research: Deep

@@ -1,7 +1,6 @@
 // DOOM — Doom inside an Ultrahand overlay
 //
-// Adapted from sx-doom-overlay (Chase Gober), which is the confirmed-working
-// reference build. Architecture is identical:
+// Architecture:
 //   - Single-threaded: engine tick + render in libtesla update()/draw().
 //   - doomgeneric_Create() called lazily in first update() — after framebuffer ready.
 //   - doomgeneric_Tick() called in 35 Hz accumulator in update().
@@ -184,15 +183,15 @@ std::vector<WadEntry> scan_wads() {
     return result;
 }
 
-// Pick whichever trace log already exists on disk so multiple builds (Ethan's
-// older fork at /config/sx-doom-overlay/, current main at /config/doom/) all
-// append to the same file rather than each making its own. First call
-// resolves the path; subsequent calls reuse it.
+// Pick whichever trace log already exists on disk so multiple builds
+// (legacy fork at /config/sx-doom-overlay/, current canonical at
+// /config/doom/) all append to the same file rather than each making
+// its own. First call resolves the path; subsequent calls reuse it.
 static const char* resolve_trace_log_path() {
     static const char* resolved = nullptr;
     if (resolved) return resolved;
     static const char* candidates[] = {
-        "sdmc:/config/sx-doom-overlay/trace.log",  // legacy / Ethan's fork
+        "sdmc:/config/sx-doom-overlay/trace.log",  // legacy fork
         "sdmc:/config/doom/trace.log",             // current canonical
     };
     for (auto p : candidates) {
@@ -493,7 +492,7 @@ inline void draw_doom_viewport(tsl::gfx::Renderer* renderer,
 // action buttons. The buttons render in libtesla-footer style — same
 // y baseline (693), same font size (23 pt), same corner radius (12 px),
 // same colors (a(tsl::clickColor) highlight, a(tsl::bottomTextColor)
-// text) as Ethan's WAD picker footer ("B Back  A OK"). Touch-only:
+// text) as the WAD picker footer ("B Back  A OK"). Touch-only:
 // idle state shows just the label; press shows the rounded-rect
 // highlight; release-in-bounds fires the action; drag-out cancels.
 class DoomElement final : public tsl::elm::Element {

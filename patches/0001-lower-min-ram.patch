@@ -1,4 +1,3 @@
-From: chase <gober.chase@gmail.com>
 Subject: [PATCH 0001] Lower DEFAULT_RAM and MIN_RAM to 3 MiB for overlay budget
 
 The Switch overlay environment caps total heap at 8 MiB (system memory pool

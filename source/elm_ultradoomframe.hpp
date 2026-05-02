@@ -18,9 +18,10 @@
 #include <ultra.hpp>
 #include <string>
 
-// Version label shown on the overlay header. Fallback when the build system
-// doesn't pass -DAPP_VERSION (Ethan's Makefile sets it; ours doesn't yet —
-// Task 11 territory). Hardcoded "0.1.0" until then.
+// Version label shown on the overlay header. Fallback when the build
+// system doesn't pass -DAPP_VERSION; the project Makefile defines it
+// from APP_VERSION + git branch + short hash so this fallback is only
+// hit by out-of-tree builds.
 #ifndef APP_VERSION
 #define APP_VERSION "0.1.0"
 #endif

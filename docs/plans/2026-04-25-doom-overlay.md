@@ -1,7 +1,7 @@
 # Doom Overlay Implementation Plan
 
 Created: 2026-04-25
-Author: gober.chase@gmail.com
+Author: <redacted>
 Status: PENDING
 Approved: Yes
 Iterations: 0
@@ -96,11 +96,11 @@ Not applicable — this is a Switch homebrew overlay, not a service. Test paths:
 - **A6 — Ultrahand's settings UI 8 MB option does not regress in any future Ultrahand release.** The `4 / 6 / 8 MB` ladder is documented; if it changes, our error-screen UX may become stale text. Low risk. — Task 10 depends.
 - **A7 — Switch SD-card random-read latency is < 30 ms per lump.** Standard SD class 10 spec. Lump fetches dominate level-transition latency. — Task 7.
 
-## Research v2 — Empirical Findings (added 2026-04-25 after Ethan's chocolate-doom-nx attempt)
+## Research v2 — Empirical Findings (added 2026-04-25 after a contributor's chocolate-doom-nx attempt)
 
 Four parallel research agents (A: chocolate-doom-nx failure, B: UltraGB architecture, C: Doom port catalog, D: empirical overlay constraints) — full reports at `/tmp/prd-research-2-*.md`. Key findings now baked into the plan:
 
-1. **chocolate-doom-nx is empirically dead-end for overlays.** It depends on SDL2 video / SDL_OpenGL / SDL_mixer; the overlay's `nvdrv:a` permission mask (`0x10A9` per switchbrew.org) lacks the GL bits, and `audren:u` is missing for SDL_mixer. `SDL_INIT_VIDEO` fails first → `I_Error` → `exit(-1)` → entire overlay sysmodule dies. (This is exactly Ethan's UltraDoom crash signature.) No code changes can fix this without rewriting chocolate-doom-nx to be functionally identical to doomgeneric.
+1. **chocolate-doom-nx is empirically dead-end for overlays.** It depends on SDL2 video / SDL_OpenGL / SDL_mixer; the overlay's `nvdrv:a` permission mask (`0x10A9` per switchbrew.org) lacks the GL bits, and `audren:u` is missing for SDL_mixer. `SDL_INIT_VIDEO` fails first → `I_Error` → `exit(-1)` → entire overlay sysmodule dies. (This is exactly a contributor's UltraDoom crash signature.) No code changes can fix this without rewriting chocolate-doom-nx to be functionally identical to doomgeneric.
 
 2. **`samar-01/doomswitch` (Nov 2024) is the only published doomgeneric Switch fork — and `DG_DrawFrame()` is empty.** Top 200 forks of ozkl/doomgeneric have ZERO completed Switch ports. **Our work is genuinely first-of-kind.**
 
@@ -116,9 +116,9 @@ Four parallel research agents (A: chocolate-doom-nx failure, B: UltraGB architec
 
 8. **WAD size > heap size is the second blocker.** Doom2 IWAD is 14 MB; max workable heap is ~10–12 MB. Engine MUST use lazy lump caching (`PU_CACHE`), not full-load. doomgeneric does this by default; just need to verify the reads don't bypass cache.
 
-9. **HOS 22 (April 2026) breaks nx-ovlloader 2.0.0** via libnx upstream commit `fdf3c87` (Ultrahand-Overlay/issues/305). **Action item: verify Chase's HOS version before deploying.**
+9. **HOS 22 (April 2026) breaks nx-ovlloader 2.0.0** via libnx upstream commit `fdf3c87` (Ultrahand-Overlay/issues/305). **Action item: verify the project author's HOS version before deploying.**
 
-10. **`/atmosphere/crash_reports/*.bin` files are unreadable without the CrashLogger sysmodule.** **Action item for Ethan and Chase: install CrashLogger before Task 6 hardware testing** so any crash gives us a real stack trace, not a silent `.bin` file.
+10. **`/atmosphere/crash_reports/*.bin` files are unreadable without the CrashLogger sysmodule.** **Action item for the contributor and the project author: install CrashLogger before Task 6 hardware testing** so any crash gives us a real stack trace, not a silent `.bin` file.
 
 11. **Heap-too-small: use `tsl::notification` toast, not a blocking error screen** (UltraGB pattern from `main.cpp:338-353`). User can keep navigating; per-tier message tells them what to bump to.
 
@@ -128,9 +128,9 @@ Four parallel research agents (A: chocolate-doom-nx failure, B: UltraGB architec
 
 14. **No `AppletHookCookie` needed** — use libtesla's `Overlay::onHide` / `onShow` lifecycle hooks directly (UltraGB `main.cpp:2667-2855`). Simpler.
 
-## What Transfers From Ethan's UltraDoom-Overlay Work
+## What Transfers From a contributor's UltraDoom-Overlay Work
 
-Ethan's `UltraDoom-Overlay` engine layer (chocolate-doom-nx) is a dead end (research finding #1) — but a substantial portion of his work is directly applicable to the doomgeneric path and saves us reimplementation:
+a contributor's `UltraDoom-Overlay` engine layer (chocolate-doom-nx) is a dead end (research finding #1) — but a substantial portion of his work is directly applicable to the doomgeneric path and saves us reimplementation:
 
 - **Project Makefile structure** — his `lib/libultrahand` junction pattern, `SDL_EXCLUDE` filtering approach, link order. Adapt to Linux/WSL paths but keep the structure.
 - **`source/doom_input.hpp`** — HID → Doom keycode mapping table. Directly reusable; the engine target doesn't change input semantics.
@@ -153,9 +153,9 @@ What does NOT transfer:
 |---|---|---|---|
 | `audout` exclusive on user's HOS+game combo at *init time*, `audoutInitialize` fails. | **Low** (downgraded — UltraGB ships this path successfully) | Medium | `DG_sound_module->Init` returns false on `audoutInitialize` failure; doomgeneric falls back to silent automatically. One-time toast informs user. (Task 9 DoD covers this branch.) |
 | `audout` *submit-time* failure — init succeeded but a foreground game later acquires the device exclusively, causing `audoutAppendAudioOutBuffer` to fail mid-gameplay. | Low | Low | Audio thread checks every submit return code; on failure, sets `g_audio_failed`, drains ring, exits cleanly. `DG_sound_module->Update` short-circuits to no-op. Same one-time toast. Engine continues at 35 Hz unaffected. (Task 9 DoD covers this branch.) |
-| **Engine `exit()` / `I_Error` kills the entire nx-ovlloader sysmodule** (not just the overlay). | **High** (THE primary blocker — confirmed by Ethan's UltraDoom crash) | **Critical** | `patches/0002-patch-exit-sites.patch` (added in Task 2) converts the 5 `exit()` sites in `i_system.c` (L262/369/453/466/468) and the `I_Error` body to `setjmp/longjmp` + `tsl::notification` toast. Engine errors become survivable. Without this patch, ANY engine error (Z_Init OOM, missing WAD, bad lump) terminates the user's overlay system. |
-| **HOS 22 (April 2026) breaks nx-ovlloader 2.0.0** via libnx upstream commit `fdf3c87` (Ultrahand-Overlay/issues/305). | Medium | High | Verify Chase's HOS version before deploying. If on HOS 22, wait for nx-ovlloader 2.0.1+ or pin libnx in our build. Document in README. |
-| **Crash reports unreadable without CrashLogger sysmodule.** Default Atmosphère writes binary `.bin` files we can't read. | Low | Medium | **Action: Chase + Ethan install CrashLogger sysmodule** (https://github.com/p-sam/switch-crashlogger) before Task 6 hardware testing. CrashLogger writes human-readable `.log` files. README install instructions to include this step. |
+| **Engine `exit()` / `I_Error` kills the entire nx-ovlloader sysmodule** (not just the overlay). | **High** (THE primary blocker — confirmed by a contributor's UltraDoom crash) | **Critical** | `patches/0002-patch-exit-sites.patch` (added in Task 2) converts the 5 `exit()` sites in `i_system.c` (L262/369/453/466/468) and the `I_Error` body to `setjmp/longjmp` + `tsl::notification` toast. Engine errors become survivable. Without this patch, ANY engine error (Z_Init OOM, missing WAD, bad lump) terminates the user's overlay system. |
+| **HOS 22 (April 2026) breaks nx-ovlloader 2.0.0** via libnx upstream commit `fdf3c87` (Ultrahand-Overlay/issues/305). | Medium | High | Verify the project author's HOS version before deploying. If on HOS 22, wait for nx-ovlloader 2.0.1+ or pin libnx in our build. Document in README. |
+| **Crash reports unreadable without CrashLogger sysmodule.** Default Atmosphère writes binary `.bin` files we can't read. | Low | Medium | **Action: the project author + the contributor install CrashLogger sysmodule** (https://github.com/p-sam/switch-crashlogger) before Task 6 hardware testing. CrashLogger writes human-readable `.log` files. README install instructions to include this step. |
 | **Sleep mid-save:** Switch suspends between fwrite calls, truncating the `.dsg` save file. | Low | Medium | Task 12 wraps Doom's save write with atomic write (`fwrite` to `doomsavN.dsg.tmp`, `fsync`, `rename` to `doomsavN.dsg`). Verified by intentionally killing the process mid-save in a desktop test. |
 | **SD card pulled mid-lump-read** during level transition or mid-gameplay sprite fetch. | Low | Low | Documented as known limitation; doomgeneric's `W_LumpLength` / `W_ReadLump` short-read produces an `I_Error` — engine shows its own error screen rather than corrupting state. We do not catch or recover. |
 | **Multi-overlay audout conflict:** user opens DoomOverlay, then summons Ultrahand and opens a second overlay; on returning to Doom the audio thread state may be indeterminate. | Low | Low | `Overlay::onHide()` pauses audio; `Overlay::onShow()` re-anchors wall-clock and reinits `audoutStartAudioOut`. If reinit fails, falls into the silent-fallback path. (UltraGB pattern; no AppletHookCookie needed.) |
@@ -283,15 +283,15 @@ Re-tested `-mb 6` after the framebuffer/swizzle bugs were resolved. Engine still
 
 **Files:**
 
-- Create: `/mnt/c/Users/Chase/dev/sx-doom-overlay/.gitignore`
-- Create: `/mnt/c/Users/Chase/dev/sx-doom-overlay/.gitmodules`
-- Create: `/mnt/c/Users/Chase/dev/sx-doom-overlay/Makefile`
-- Create: `/mnt/c/Users/Chase/dev/sx-doom-overlay/sx-doom-overlay.json` (NACP config)
-- Create: `/mnt/c/Users/Chase/dev/sx-doom-overlay/source/main.cpp` (placeholder `tsl::loop` entry that exits cleanly)
-- Create: `/mnt/c/Users/Chase/dev/sx-doom-overlay/patches/.gitkeep`
-- Create: `/mnt/c/Users/Chase/dev/sx-doom-overlay/data/.gitkeep`
-- Delete: `/mnt/c/Users/Chase/dev/sx-doom-overlay/Ultrahand-Overlay/` (reference)
-- Delete: `/mnt/c/Users/Chase/dev/sx-doom-overlay/_reference/` (reference)
+- Create: `/mnt/c/Users/the project author/dev/sx-doom-overlay/.gitignore`
+- Create: `/mnt/c/Users/the project author/dev/sx-doom-overlay/.gitmodules`
+- Create: `/mnt/c/Users/the project author/dev/sx-doom-overlay/Makefile`
+- Create: `/mnt/c/Users/the project author/dev/sx-doom-overlay/sx-doom-overlay.json` (NACP config)
+- Create: `/mnt/c/Users/the project author/dev/sx-doom-overlay/source/main.cpp` (placeholder `tsl::loop` entry that exits cleanly)
+- Create: `/mnt/c/Users/the project author/dev/sx-doom-overlay/patches/.gitkeep`
+- Create: `/mnt/c/Users/the project author/dev/sx-doom-overlay/data/.gitkeep`
+- Delete: `/mnt/c/Users/the project author/dev/sx-doom-overlay/Ultrahand-Overlay/` (reference)
+- Delete: `/mnt/c/Users/the project author/dev/sx-doom-overlay/_reference/` (reference)
 - Submodule add: `https://github.com/ppkantorski/libultrahand.git` → `lib/libultrahand`
 - Submodule add: `https://github.com/ozkl/doomgeneric.git` → `lib/doomgeneric`
 
@@ -789,7 +789,7 @@ None at this stage — all major decisions are resolved either in the PRD or in 
 
 ## Deferred Ideas
 
-- **Aspect-correct rendering (1.2× vertical stretch)** — Doom's original DOS pixels are 4:3, not square. 320×200 displayed at square 1× scale looks horizontally stretched on a modern panel. Ethan's UltraDoom plan uses a 448×336 viewport that effectively does aspect correction. Our v1 ships square-pixel output (1×, 2×, 3× integer scale of 320×200) for simplicity; aspect-correct mode is a v2 enhancement that requires fractional vertical scaling (e.g., 2× horiz × 2.4× vert) and a corresponding update to the blit module. Worth adding once the foundation is proven on hardware. Captured here as a Deferred Idea so we don't lose the insight.
+- **Aspect-correct rendering (1.2× vertical stretch)** — Doom's original DOS pixels are 4:3, not square. 320×200 displayed at square 1× scale looks horizontally stretched on a modern panel. a contributor's UltraDoom plan uses a 448×336 viewport that effectively does aspect correction. Our v1 ships square-pixel output (1×, 2×, 3× integer scale of 320×200) for simplicity; aspect-correct mode is a v2 enhancement that requires fractional vertical scaling (e.g., 2× horiz × 2.4× vert) and a corresponding update to the blit module. Worth adding once the foundation is proven on hardware. Captured here as a Deferred Idea so we don't lose the insight.
 - **NEON-accelerated blit** — scalar reference is fine for v1 budget; NEON kernels for `blit_doom_to_rgba4444` would shave headroom but aren't required.
 - **OPL2 / OPL3 music synth** — Doom's MUS music sounds best with hardware FM synthesis. Software MIDI fallback is acceptable for v1; OPL emulation is a quality bump for v2.
 - **Per-weapon haptic profiles** — vibration is a binary toggle in v1; per-weapon rumble patterns is a polish item.

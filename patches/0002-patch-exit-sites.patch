@@ -1,4 +1,3 @@
-From: chase <gober.chase@gmail.com>
 Subject: [PATCH 0002] Convert i_system.c exit() sites to setjmp/longjmp
 
 In an Ultrahand overlay, exit() from engine code terminates the entire

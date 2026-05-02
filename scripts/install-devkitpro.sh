@@ -164,4 +164,4 @@ fi
 bold "==> Done. Verify by running:"
 echo "       source $SHELL_RC"
 echo "       echo \$DEVKITPRO    # should print /opt/devkitpro"
-echo "       cd /mnt/c/Users/Chase/dev/sx-doom-overlay && make"
+echo "       cd /path/to/sx-doom-overlay && make"
