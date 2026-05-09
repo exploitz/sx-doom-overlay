@@ -84,6 +84,10 @@ typedef struct audio_backend_debug_s {
 
 void audio_backend_debug(const audio_backend_t* be, audio_backend_debug_t* out);
 
+// Boost level 0-4: applies a post-mix gain (1.0×–2.0×) with soft-knee limiting.
+// Thread-safe; may be called from any thread at any time.
+void audio_backend_set_boost(int level);
+
 #ifdef __cplusplus
 }
 #endif

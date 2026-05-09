@@ -2,7 +2,7 @@
 //
 // Replaces the OPL3 FM synthesizer with a streaming OGG decoder. Doom's
 // MIDI lumps are pre-rendered offline (FluidSynth + GM soundfont) into
-// OGG files that live at /switch/sx-doom-overlay/music/<lumpname>.ogg.
+// OGG files that live at sdmc:/config/doom/music/<lumpname>.ogg.
 //
 // The engine still calls the music_module_t function table; we just
 // satisfy those calls by streaming a file instead of synthesizing FM.
@@ -41,6 +41,16 @@ void music_ogg_set_iwad(const char* iwad_basename);
 //   "silent"         — no song active (intermission, between levels)
 // Lockless. The string is a static literal — never free it.
 const char* music_ogg_current_backend(void);
+
+// Returns the current IWAD basename (lowercase, no extension) as set by
+// music_ogg_set_iwad. Returns "" if not set. Safe to call from any thread.
+const char* music_ogg_get_iwad(void);
+
+// Force-open and play a specific OGG file, bypassing engine lump resolution.
+// Tears down any current decoder, opens path, starts looping playback.
+// The engine will override this on the next S_ChangeMusic (level change).
+// Returns 1 if opened successfully, 0 on failure (OPL fallback stays silent).
+int music_ogg_force_track(const char* path);
 
 #ifdef __cplusplus
 }

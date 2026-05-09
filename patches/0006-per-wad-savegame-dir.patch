@@ -10,13 +10,13 @@ index 865e168..7c8a9c9 100644
 -
 -        M_MakeDirectory(savegamedir);
 -
-+        /* sx-doom-overlay: include iwadname so each WAD gets its own savegame
-+         * subdirectory. Original chocolate-doom non-ORIGCODE path ignored
-+         * iwadname, causing slot N to collide across WADs (saving in Doom
-+         * would overwrite slot N from Chex etc). Mirrors the ORIGCODE branch
-+         * that does include iwadname. */
++        /* sx-doom-overlay: hardcoded save root at sdmc:/config/doom/saves so
++         * saves always land in the expected overlay config directory regardless
++         * of what configdir resolves to at runtime (the Switch cwd is
++         * unreliable for overlays). Each WAD gets its own subdirectory so slot
++         * N never collides across WADs. */
 +        {
-+            char *topdir = M_StringJoin(configdir, DIR_SEPARATOR_S, ".savegame", NULL);
++            char *topdir = M_StringDuplicate("sdmc:/config/doom/saves");
 +            M_MakeDirectory(topdir);
 +            savegamedir = M_StringJoin(topdir, DIR_SEPARATOR_S, iwadname, DIR_SEPARATOR_S, NULL);
 +            M_MakeDirectory(savegamedir);

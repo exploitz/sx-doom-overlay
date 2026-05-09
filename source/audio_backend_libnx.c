@@ -128,6 +128,8 @@ static size_t ring_drain(struct audio_backend_s* be, int16_t* out, size_t frames
 // On audout error we record it but DO NOT mark dead from here. The submit
 // path keeps trying — transient errors during libtesla state changes have
 // recovered in practice in UltraGB (resync block).
+static volatile int s_boost_level = 0;
+
 static void submit_thread_main(void* arg) {
     struct audio_backend_s* be = (struct audio_backend_s*)arg;
 
@@ -185,9 +187,16 @@ static void submit_thread_main(void* arg) {
         const int total_samples = FRAMES_PER_BUF * AUDIO_BACKEND_CHANNELS;
         const int32_t SFX_SCALE   = 160;   // 62%, unchanged — gunshots stay punchy
         const int32_t MUSIC_SCALE =  96;   // 37.5%, was 160
+        const int boost = s_boost_level;   // 0-4: 1.0×–2.0× post-mix gain
         for (int i = 0; i < total_samples; ++i) {
             int32_t s = ((int32_t)out[i] * SFX_SCALE
                        + (int32_t)music_scratch[i] * MUSIC_SCALE) >> 8;
+            // Post-mix boost + soft-knee limiter (knee at 70% = 22938, 4:1 above)
+            if (boost > 0) {
+                s = s + (s * boost * 64 >> 8);  // s *= (256 + boost*64) / 256
+                if      (s >  22938) s = 22938 + ((s - 22938) >> 2);
+                else if (s < -22938) s = -22938 - ((-s - 22938) >> 2);
+            }
             if (s >  32767) s =  32767;
             if (s < -32768) s = -32768;
             out[i] = (int16_t)s;
@@ -357,6 +366,10 @@ bool audio_backend_submit(audio_backend_t* be, const int16_t* pcm, size_t frames
     }
     mutexUnlock(&be->ring_mtx);
     return true;
+}
+
+void audio_backend_set_boost(int level) {
+    s_boost_level = (level < 0) ? 0 : (level > 4) ? 4 : level;
 }
 
 void audio_backend_debug(const audio_backend_t* be, audio_backend_debug_t* out) {

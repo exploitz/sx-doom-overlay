@@ -228,6 +228,8 @@ all: $(OUTPUT).ovl
 
 $(OUTPUT).ovl: $(OUTPUT).nro
 	@cp $< $@
+	@printf 'ULTR' >> $@
+	@printf "Ultrahand signature has been added.\n"
 	@echo "[ovl] $(notdir $@)"
 
 # Override switch_rules' default %.nro recipe so elf2nro embeds the .nacp.

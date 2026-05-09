@@ -69,6 +69,7 @@ extern "C" {
 void doomgeneric_switch_push_key(int pressed, unsigned char key);
 void doomgeneric_switch_weapon_prev(void);  // reads engine state, skips unowned
 void doomgeneric_switch_weapon_next(void);
+void doomgeneric_switch_push_cheat(const char* str);
 // In main.cpp.
 void doom_trace(const char* msg);
 }

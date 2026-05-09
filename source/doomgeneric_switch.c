@@ -207,6 +207,17 @@ static void cycle_weapon(int direction) {
 void doomgeneric_switch_weapon_prev(void) { cycle_weapon(-1); }
 void doomgeneric_switch_weapon_next(void) { cycle_weapon(+1); }
 
+// Inject a cheat string into the key queue, one character per two tics.
+// DOWN at gametic+i*2, UP at gametic+i*2+1 — same stagger as push_digit()
+// so st_stuff.c's cht_CheckCheat() sees each keypress for exactly one tic.
+void doomgeneric_switch_push_cheat(const char* str) {
+    int len = (int)strlen(str);
+    for (int i = 0; i < len; i++) {
+        enqueue_key(1, (unsigned char)str[i], gametic + i * 2);
+        enqueue_key(0, (unsigned char)str[i], gametic + i * 2 + 1);
+    }
+}
+
 int DG_GetKey(int* pressed, unsigned char* key) {
     if (s_kq_read == s_kq_write) return 0;  // queue empty
     // Eligibility gate: if the head event was tagged for a future tic

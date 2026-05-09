@@ -83,7 +83,7 @@ static void* g_opl_handle    = NULL; // handle returned by OPL RegisterSong
 //   <MUSIC_DIR>/d_<lumpname>.ogg   (e.g. /.../music/d_e1m1.ogg)
 // matching chocolate-doom's lump naming convention. The render script in
 // scripts/render-music.sh produces files at exactly this layout.
-#define MUSIC_DIR  "sdmc:/switch/sx-doom-overlay/music"
+#define MUSIC_DIR  "sdmc:/config/doom/music"
 
 // Fallback path used when we can't resolve the lump to a name. Useful as
 // a "drop one OGG and hear it on every track" smoke test.
@@ -642,4 +642,26 @@ void music_ogg_render(int16_t* dst, size_t frames) {
     }
 
     MUSIC_UNLOCK();
+}
+
+const char* music_ogg_get_iwad(void) {
+    return g_iwad_name;
+}
+
+int music_ogg_force_track(const char* path) {
+    MUSIC_LOCK();
+    close_decoder_locked();
+    g_opl_active = 0;
+    int ok = try_open_path_locked(path);
+    if (ok) {
+        g_music.playing = 1;
+        g_music.paused  = 0;
+        g_music.looping = 1;
+    }
+    MUSIC_UNLOCK();
+    char tbuf[200];
+    snprintf(tbuf, sizeof(tbuf), "music_ogg: force_track %s -> %s",
+             path, ok ? "ok" : "FAILED");
+    doom_trace(tbuf);
+    return ok;
 }

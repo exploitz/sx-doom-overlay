@@ -216,8 +216,16 @@ public:
 
     void setFooterHidden(bool hidden) {
         m_footerHidden = hidden;
-        // Tell libtesla no page buttons exist so it won't process footer touches.
-        if (hidden) ult::hasNextPageButton.store(false, std::memory_order_release);
+        if (hidden) {
+            // Kill all footer touch zones so libtesla doesn't map footer touches
+            // to B/A button events. backWidth/selectWidth define the x-ranges
+            // libtesla uses; leaving them non-zero causes bottom-screen taps to
+            // inject HidNpadButton_B every frame → KEY_FIRE → constant weapon fire.
+            ult::hasNextPageButton.store(false, std::memory_order_release);
+            ult::backWidth.store(0.f,   std::memory_order_release);
+            ult::selectWidth.store(0.f, std::memory_order_release);
+            ult::halfGap.store(0.f,     std::memory_order_release);
+        }
         invalidate();
     }
 
